@@ -17,8 +17,7 @@
 * para que una persona lo lea (Mu\u00F1oz no se lee); y aquí el fichero va
 * fila a fila y las tools cortan en maxRows, cuando CursorToJSON hace la
 * tabla entera en una cadena. Con los \uXXXX vueltos a CP1252, los dos
-* escriben lo mismo, y DataJsonTests.TestCursorToJsonWritesWhatDataJsonWritesWithTheLettersEscaped
-* lo comprueba. LEER lo hace JSONFox (JSONToCursor), y lo escrito aquí vuelve
+* escriben lo mismo. LEER lo hace JSONFox (JSONToCursor), y lo escrito aquí vuelve
 * con el mismo texto.
 *
 * Cada valor:  C, V, M  texto sin el relleno del final, en CPCURRENT()
@@ -32,8 +31,6 @@
 *              NULL     null
 * El fichero va en UTF-8 sin BOM, convertido desde CPCURRENT() (VFP ya
 * tradujo al leer); el portapapeles y las tools, en CPCURRENT().
-*
-* Fichero en CP1252, con los acentos escritos.
 *==================================================================
 
 #DEFINE CRLF CHR(13) + CHR(10)
@@ -44,7 +41,7 @@ DEFINE CLASS DataJson AS Custom
 	oHost = .NULL.
 	cLastFile = ""
 	cLastCursor = ""
-	cLastClip = ""    && lo último que puso en el portapapeles (lo lee la suite)
+	cLastClip = ""    && lo último que puso en el portapapeles (para las pruebas)
 	cLastError = ""
 	nLastRows = 0
 	cCtl = ""         && los caracteres de control que van como \u00XX
@@ -136,8 +133,8 @@ DEFINE CLASS DataJson AS Custom
 		RETURN llOk
 	ENDPROC
 
-	*-- tcJson: el texto, para quien no quiera pasar por el portapapeles (la
-	*-- suite: en una máquina en uso, otro proceso lo cambia entre el caso y la
+	*-- tcJson: el texto, para quien no quiera pasar por el portapapeles (las
+	*-- pruebas: en una máquina en uso, otro proceso lo cambia entre el caso y la
 	*-- barra). La barra no lo pasa y lee el portapapeles. Con texto, nunca
 	*-- GETFILE: si no es JSON, lo dice.
 	PROCEDURE JsonToCursor
@@ -464,7 +461,7 @@ DEFINE CLASS DataJson AS Custom
 	*-- Un cursor vacío (sesión de datos 1) con las columnas del esquema
 	*-- de Export... (name, type, width, decimals, nullable, como
 	*-- ide_data_db_describe). .T. si lo hizo, o el motivo en cLastError. Los
-	*-- anchos se acotan a lo que VFP admite (C(255) da el error 1713, vfpdocs).
+	*-- anchos se acotan a lo que VFP admite (C(255) da el error 1713).
 	PROTECTED PROCEDURE SchemaCursor
 		LPARAMETERS tcColumns, tcCursor
 		LOCAL loP, loJ, lcTmp, lcFields, lcName, lcType, lnW, lnD, llNull, loErr, llOk

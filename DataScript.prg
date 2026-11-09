@@ -24,13 +24,11 @@
 * una, cambia la otra.
 *
 * El dialecto VFP: un literal de cadena no pasa de 255 caracteres y una línea
-* de órdenes de 8.192 (vfpdocs, System Capacities). Las cadenas van a trozos
+* de órdenes de 8.192 (System Capacities, en la ayuda de VFP). Las cadenas van a trozos
 * de 200 unidos con «+», los caracteres de control como CHR(n), y una cadena
 * de más de 1000 caracteres de expresión no va en el INSERT o el UPDATE: va
 * vacía y se añade detrás, a trozos (REPLACE tras un INSERT, UPDATE tras un
 * UPDATE).
-*
-* Fichero en CP1252, con los acentos escritos.
 *==================================================================
 
 #DEFINE CRLF CHR(13) + CHR(10)

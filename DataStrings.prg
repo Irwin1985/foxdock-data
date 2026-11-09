@@ -5,7 +5,7 @@
 * por cadena. Las tres listas llevan las mismas claves, en el mismo orden; una que
 * falte en español o alemán sale en inglés. {1} a {4}, los valores. \< marca la
 * tecla de acceso. Los nombres propios (FoxDock, FoxAgent, VFP, GUID, JSON) no se
-* traducen. Fichero en CP1252, con los acentos escritos: lo lee el usuario.
+* traducen.
 *==================================================================
 
 LPARAMETERS toHost

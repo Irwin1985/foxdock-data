@@ -3,7 +3,7 @@
   "kind": "foxdock-plugin",
   "id": "data",
   "foxdockApi": 1,
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "Tables, cursors and database connections from the IDE: JSON in and out, export, SQL scripts and an explorer for ODBC servers",
   "license": "MIT",
   "files": [

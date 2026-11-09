@@ -116,13 +116,11 @@
 *            fuerza. Para las pruebas: no tiene barra
 *   blockRows     las filas por bloque de una operación (200; de 1 a 1000)
 *   agentMaxRows  las filas que el agente puede mandar en una llamada (200)
-* Los ganchos de pruebas (DataAiTests; nunca en un IDE de trabajo):
+* Los ganchos de pruebas (nunca en un IDE de trabajo):
 *   _screen.cFoxDockAiLocate   "none" (sin AIXL.Host) o "dll=<ruta>" (el
 *                              InProcServer32 que daría el registro)
 *   _screen.cFoxDockAiVersion  la versión que daría el objeto
 *   _screen.cAixlProgIdOverride, el de aixl.prg: un ProgId que no existe
-*
-* Superficie pública en inglés. Fichero en CP1252, con los acentos escritos.
 *==================================================================
 
 #DEFINE CRLF CHR(13) + CHR(10)
@@ -165,8 +163,8 @@ DEFINE CLASS DataAi AS Custom
 	oForms = .NULL.    && las ventanas abiertas (Retext, al apagar)
 	cLastBrowse = ""   && lo que se enseñó (o se habría enseñado con el _screen oculto) al acabar
 	cLastNotice = ""   && la última línea de la operación (la que va a la barra de estado)
-	cEscapeInRun = ""  && SET("ESCAPE") que vio el callback (DataAiTests: OFF durante el lote)
-	nLastKey = 0       && la tecla que vio el callback (DataAiTests)
+	cEscapeInRun = ""  && SET("ESCAPE") que vio el callback (las pruebas: OFF durante el lote)
+	nLastKey = 0       && la tecla que vio el callback (para las pruebas)
 	lStopAsked = .F.   && Esc en la ventana durante el lote (KeyPress, con KeyPreview)
 	cBusyKind = ""     && la operación del lote (BusyText)
 	oProviders = .NULL. && la lista de proveedores (ai-providers.json), por id
@@ -1318,7 +1316,7 @@ DEFINE CLASS DataAi AS Custom
 		LPARAMETERS tlText
 		LOCAL lnN, lnI, lcA, lcOut
 		LOCAL ARRAY laU[1]
-		*-- AUSED con la sesión 1 (vfpdocs); por el número de área, que no cambia.
+		*-- AUSED con la sesión 1; por el número de área, que no cambia.
 		lnN = AUSED(laU, 1)
 		IF lnN > 1
 			=ASORT(laU, 2)
@@ -1577,7 +1575,7 @@ DEFINE CLASS DataAi AS Custom
 								ENDIF
 								lcFilter = FILTER(loT.cAlias)
 								*-- Un SELECT * FROM t INTO CURSOR c sin más es un filtro sobre t
-								*-- (vfpdocs: un cursor «reempaquetado»), y otro SELECT sobre c da el error 1815.
+								*-- (un cursor «reempaquetado»), y otro SELECT sobre c da el error 1815.
 								*-- Entonces la copia va fila a fila (CopyByRows), con el mismo FILTER().
 								TRY
 									IF EMPTY(lcFilter)
@@ -2292,8 +2290,7 @@ DEFINE CLASS DataAiClassifyForm AS Form
 	*-- La línea de la copia y la frase del coste, del objeto vivo: se rehacen
 	*-- justo antes de Run. Con tlKeep (una tecla en la caja de las columnas), con
 	*-- las filas ya contadas: abrir y cerrar la tabla en cada tecla devuelve el
-	*-- cursor de la caja al principio, y «ID» se escribiría «DI»
-	*-- (TestTypingInTheColumnsBoxKeepsTheOrder).
+	*-- cursor de la caja al principio, y «ID» se escribiría «DI».
 	PROCEDURE Cost
 		LPARAMETERS tlKeep
 		LOCAL loM, loT, lnN, lcWhat, llRo, lcWork, lcCols

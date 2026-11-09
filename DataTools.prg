@@ -21,8 +21,6 @@
 *
 * Una tool de un módulo apagado no existe (el módulo no la añade). Las filas
 * que vuelven son 1000 como mucho (maxRows), y la respuesta dice si se cortó.
-*
-* Superficie pública en inglés. Fichero en CP1252.
 *==================================================================
 
 #DEFINE DT_NO_HOST "FoxDock is not mounted (after CLEAR ALL it sleeps until a FoxDock menu bar or key is pressed)"

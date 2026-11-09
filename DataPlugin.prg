@@ -37,8 +37,6 @@
 * UTF-8 (el .json, y el .sql con options.data.script.utf8) NO se abre en el
 * editor de VFP, que lo guardaría mezclado: se abre con la aplicación que
 * Windows tenga para ese tipo (OpenWithWindows).
-*
-* Superficie pública en inglés. Fichero en CP1252, con los acentos escritos.
 *==================================================================
 
 #DEFINE CRLF CHR(13) + CHR(10)
@@ -47,11 +45,11 @@ DEFINE CLASS DataPlugin AS PluginBase
 	cId = "data"
 	cTitle = "Data"
 	nOrder = 920
-	cVersion = "0.7.4"
+	cVersion = "0.7.5"
 	lWantsIdle = .T.
 	oModules = .NULL.
-	*-- .F.: OpenWithWindows no llama a ShellExecute (la suite: FOXDOCK_SHELL_OPEN=off;
-	*-- el arnés lo pone a mano). El log dice lo mismo, con la nota.
+	*-- .F.: OpenWithWindows no llama a ShellExecute (para las pruebas:
+	*-- FOXDOCK_SHELL_OPEN=off). El log dice lo mismo, con la nota.
 	lShellOpen = .T.
 
 	PROCEDURE Init
@@ -238,7 +236,7 @@ DEFINE CLASS DataPlugin AS PluginBase
 		LPARAMETERS tcFile
 		LOCAL lnRc
 		IF !This.lShellOpen
-			This.oHost.Log("data: " + tcFile + " opened with Windows (not really: FOXDOCK_SHELL_OPEN is off, as in the suite)")
+			This.oHost.Log("data: " + tcFile + " opened with Windows (not really: FOXDOCK_SHELL_OPEN is off, as in the tests)")
 			RETURN .T.
 		ENDIF
 		DECLARE INTEGER ShellExecute IN shell32 AS FdDataShellExecute INTEGER hWnd, STRING cOperation, STRING cFile, ;
@@ -738,7 +736,7 @@ DEFINE CLASS DataFile AS Custom
 	ENDPROC
 
 	*-- Con SET SAFETY ON, STRTOFILE sobre un fichero que existe pregunta
-	*-- (vfpdocs; SafetyTests): se apaga para la primera escritura y se repone.
+	*-- antes de escribir: se apaga para la primera escritura y se repone.
 	PROCEDURE Flush
 		LOCAL lcOut, lcSafety
 		IF EMPTY(This.cFile)

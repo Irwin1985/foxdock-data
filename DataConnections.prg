@@ -86,8 +86,6 @@
 * Sus clases se crean con NEWOBJECT desde ese fichero, que nunca entra en SET
 * PROCEDURE: así no tapa el foxremote.prg de un proyecto del usuario que
 * tenga clases con los mismos nombres.
-*
-* Superficie pública en inglés. Fichero en CP1252, con los acentos escritos.
 *==================================================================
 
 #DEFINE CRLF CHR(13) + CHR(10)
