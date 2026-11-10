@@ -46,6 +46,8 @@
 #DEFINE DS_LONG 1000
 #DEFINE DS_FB_TEXT 20000
 #DEFINE DS_FB_BIN 30000
+#DEFINE DS_FB_BUF 65536
+#DEFINE DS_FB_STMT 10485760
 
 DEFINE CLASS DataScript AS Custom
 	cId = "script"
@@ -62,6 +64,9 @@ DEFINE CLASS DataScript AS Custom
 	lRemoteNum = .F.  && las columnas son de una conexión (RemoteScript)
 	cServerNum = ""   && «,nombre:precisión:escala,» de SQLCOLUMNS NATIVE (decimal y numeric)
 	cVfpNum = ""      && «nombre:tipo de VFP;...»: las columnas N de las que el servidor no dio la precisión
+	cOctets = ""      && «,nombre:CHAR|VARCHAR:n,»: las columnas OCTETS de una tabla de Firebird (FbOctets)
+	cCtls = ""        && los caracteres de control que no van tal cual en un literal (Ctls)
+	cCatNames = ""    && los nombres del catálogo de una tabla de Firebird o PostgreSQL en su dialecto (CatalogNames)
 
 	PROCEDURE Init
 		LPARAMETERS toHost
@@ -215,10 +220,12 @@ DEFINE CLASS DataScript AS Custom
 			ENDIF
 			This.oHost.Notify(This.oHost.Translate("data.script.done", loT.cName, This.KindName(tcKind), This.DialectName(lcDialect), ;
 				IIF(tcKind == "create", "", ", " + loT.RowsShown(This.oHost, loR.nRows)), This.oHost.Translate("data.inFile", lcFile), ;
-				IIF(EMPTY(lcSkipped), "", This.oHost.Translate("data.skippedGeneral", lcSkipped))), ;
+				IIF(EMPTY(lcSkipped), "", This.oHost.Translate("data.skippedGeneral", lcSkipped)) + ;
+				IIF(loR.nLeftOut = 0, "", This.oHost.Translate("data.leftOutRows", TRANSFORM(loR.nLeftOut)))), ;
 				This.oHost.TranslateEn("data.script.done", loT.cName, This.KindName(tcKind), This.DialectName(lcDialect), ;
 				IIF(tcKind == "create", "", ", " + loT.Rows(loR.nRows)), This.oHost.TranslateEn("data.inFile", lcFile), ;
-				IIF(EMPTY(lcSkipped), "", This.oHost.TranslateEn("data.skippedGeneral", lcSkipped))))
+				IIF(EMPTY(lcSkipped), "", This.oHost.TranslateEn("data.skippedGeneral", lcSkipped)) + ;
+				IIF(loR.nLeftOut = 0, "", This.oHost.TranslateEn("data.leftOutRows", TRANSFORM(loR.nLeftOut)))))
 		ENDIF
 		RETURN llOk
 	ENDPROC
@@ -249,7 +256,7 @@ DEFINE CLASS DataScript AS Custom
 	*-- servidor): las que falten salen como truncado.
 	PROCEDURE Script
 		LPARAMETERS toT, tcKind, tcDialect, tnMax, tcFile, tlKeySet, tnTotal
-		LOCAL loF, loR, lcC, lnTotal, lnN, llTrunc, lcList, llVfp, llShow, llAllKey, lcCreate
+		LOCAL loF, loR, lcC, lnTotal, lnN, llTrunc, lcList, llVfp, llShow, llAllKey, lcCreate, lcRow, lcWhy, lnOut, loErr
 		LOCAL ARRAY laRow[1]
 		llVfp = tcDialect == "vfp"
 		loF = CREATEOBJECT("DataFile", tcFile, IIF(This.Utf8File(tcDialect), IIF(tcDialect == "firebird", "utf8", "utf8bom"), "ansi"))
@@ -263,10 +270,17 @@ DEFINE CLASS DataScript AS Custom
 		IF !EMPTY(toT.cSkipped)
 			loF.Write(lcC + "skipped: " + toT.cSkipped + " (General: its contents are not scripted)" + CRLF)
 		ENDIF
+		IF INLIST(tcDialect, "postgresql", "sqlite") AND tcKind # "create"
+			lcList = This.NulColumns(toT)
+			IF !EMPTY(lcList)
+				loF.Write(lcC + "CHR(0) taken out of: " + lcList + " (" + This.DialectName(tcDialect) + " does not keep it in a text)" + CRLF)
+			ENDIF
+		ENDIF
 		IF tcKind == "update"
 			loF.Write(lcC + This.cKeyNote + CRLF)
 		ENDIF
 		lnN = 0
+		lnOut = 0
 		llTrunc = .F.
 		IF tcKind == "create"
 			This.cVfpNum = ""
@@ -296,7 +310,23 @@ DEFINE CLASS DataScript AS Custom
 					EXIT
 				ENDIF
 				SCATTER FIELDS &lcList MEMO TO laRow
-				loF.Write(IIF(tcKind == "insert", This.InsertRow(toT, tcDialect, @laRow), This.UpdateRow(toT, tcDialect, @laRow)))
+				*-- Una fila que no cabe en una sentencia sale como comentario, y las demás siguen.
+				lcRow = ""
+				lcWhy = ""
+				TRY
+					lcRow = IIF(tcKind == "insert", This.InsertRow(toT, tcDialect, @laRow), This.UpdateRow(toT, tcDialect, @laRow))
+					IF tcDialect == "firebird" AND LEN(lcRow) > DS_FB_STMT / 3 AND LEN(STRCONV(lcRow, 9)) > DS_FB_STMT
+						lcWhy = "its statement is longer than the 10,485,760 bytes Firebird takes"
+					ENDIF
+				CATCH TO loErr WHEN loErr.ErrorNo = 1903
+					lcWhy = "its statement does not fit in a VFP string (16,777,184 characters)"
+				ENDTRY
+				IF EMPTY(lcWhy)
+					loF.Write(lcRow)
+				ELSE
+					lnOut = lnOut + 1
+					loF.Write(lcC + "row " + TRANSFORM(lnN + 1) + " left out: " + lcWhy + CRLF)
+				ENDIF
 				lnN = lnN + 1
 				IF llShow AND lnN % 10000 = 0
 					WAIT WINDOW "Data: " + toT.cName + " as " + This.KindName(tcKind) + ", " + TRANSFORM(lnN) + " of " + ;
@@ -307,12 +337,16 @@ DEFINE CLASS DataScript AS Custom
 			IF llTrunc
 				loF.Write(lcC + "truncated: the first " + TRANSFORM(lnN) + " of " + toT.Rows(lnTotal) + CRLF)
 			ENDIF
+			IF lnOut > 0
+				loF.Write(lcC + "left out: " + TRANSFORM(lnOut) + " of " + toT.Rows(lnN) + ", too long for one statement" + CRLF)
+			ENDIF
 		ENDIF
 		loF.Flush()
 		loR = CREATEOBJECT("Empty")
 		ADDPROPERTY(loR, "nRows", lnTotal)
 		ADDPROPERTY(loR, "nDone", lnN)
 		ADDPROPERTY(loR, "lTruncated", llTrunc)
+		ADDPROPERTY(loR, "nLeftOut", lnOut)
 		ADDPROPERTY(loR, "cText", IIF(EMPTY(tcFile), loF.cBuffer, ""))
 		RETURN loR
 	ENDPROC
@@ -329,6 +363,10 @@ DEFINE CLASS DataScript AS Custom
 		LOCAL loP, loM, loC, loDb, lcName, lcCols, lcTmp, lcKey, loT, loR, lnDs, loErr, llOk, lnTotal, lcErr
 		This.cLastError = ""
 		This.cLastCode = ""
+		IF !This.IsDialect(tcDialect)
+			This.cLastError = "'" + TRANSFORM(tcDialect) + "' is not a dialect: one of " + STRTRAN(DS_DIALECTS, ",", ", ") + "."
+			RETURN .NULL.
+		ENDIF
 		loP = This.Plugin()
 		loM = loP.Module("connections")
 		IF ISNULL(loM)
@@ -351,11 +389,19 @@ DEFINE CLASS DataScript AS Custom
 		SET DATASESSION TO 1
 		This.lRemoteNum = .T.
 		This.cServerNum = ""
+		This.cOctets = ""
+		This.cCatNames = ""
 		TRY
-			llOk = loDb.GetColumns(lcName, lcCols)
+			llOk = loM.BinaryRead(loDb, "columns", lcName, lcCols)
 			IF llOk
 				lcKey = LOWER(STRTRAN(loDb.GetPrimaryKey(lcName), " ", ""))
 				This.cServerNum = This.ServerNumbers(loDb.nHandle, lcName)
+				IF loC.cEngine == "firebird"
+					This.cOctets = loM.FbOctets(loDb.nHandle, lcName)
+				ENDIF
+				IF This.UseCatalogNames(loC.cEngine, tcDialect)
+					This.cCatNames = This.CatalogNames(lcName, lcCols)
+				ENDIF
 			ENDIF
 		CATCH TO loErr
 			llOk = .F.
@@ -406,6 +452,8 @@ DEFINE CLASS DataScript AS Custom
 		FINALLY
 			This.lRemoteNum = .F.
 			This.cServerNum = ""
+			This.cOctets = ""
+			This.cCatNames = ""
 			loT.Close()
 			This.CloseCursor(lcTmp)
 			This.CloseCursor(lcCols)
@@ -457,10 +505,13 @@ DEFINE CLASS DataScript AS Custom
 	*-- Las columnas de CREATE TABLE para una tabla remota, de lo que da
 	*-- GetColumns (las letras de tipo de VFP con las que llegan). Una
 	*-- columna de la clave es NOT NULL aunque el motor la dé como nullable
-	*-- (SQLite), y un varchar(max) de SQL Server llega como C(0): va como memo.
-	PROTECTED PROCEDURE ColumnsFrom
+	*-- (SQLite), y un varchar(max) de SQL Server llega como C(0): va como memo;
+	*-- un varbinary(max), como Q(0): va como W. Una columna OCTETS de Firebird
+	*-- (cOctets) llega como C: va como Q de su ancho. Una que llega como General
+	*-- va con su tipo y se nombra en cSkipped, como en las filas.
+	PROCEDURE ColumnsFrom
 		LPARAMETERS toT, tcCols, tcKey
-		LOCAL lnDs, lcName, lcType
+		LOCAL lnDs, lcName, lcType, lcOct
 		lnDs = SET("DATASESSION")
 		SET DATASESSION TO 1
 		toT.nCols = 0
@@ -469,17 +520,47 @@ DEFINE CLASS DataScript AS Custom
 		SCAN
 			lcName = LOWER(ALLTRIM(name))
 			lcType = ALLTRIM(type)
+			lcOct = STREXTRACT(This.cOctets, "," + lcName + ":", ",")
 			toT.nCols = toT.nCols + 1
 			DIMENSION toT.aCols[toT.nCols, 6]
 			toT.aCols[toT.nCols, 1] = lcName
-			toT.aCols[toT.nCols, 2] = IIF(INLIST(lcType, "C", "V") AND width = 0, "M", lcType)
-			toT.aCols[toT.nCols, 3] = width
+			toT.aCols[toT.nCols, 2] = ICASE(!EMPTY(lcOct), "Q", INLIST(lcType, "C", "V") AND width = 0, "M", ;
+				lcType == "Q" AND width = 0, "W", lcType)
+			toT.aCols[toT.nCols, 3] = IIF(EMPTY(lcOct), width, INT(VAL(GETWORDNUM(lcOct, 2, ":"))))
+			IF lcType == "G"
+				toT.cSkipped = toT.cSkipped + IIF(EMPTY(toT.cSkipped), "", ",") + lcName
+			ENDIF
 			toT.aCols[toT.nCols, 4] = decimals
 			toT.aCols[toT.nCols, 5] = nullable AND !primary_key AND !("," + lcName + "," $ "," + tcKey + ",")
 			toT.aCols[toT.nCols, 6] = .F.
 			toT.cFieldList = toT.cFieldList + IIF(EMPTY(toT.cFieldList), "", ",") + lcName
 		ENDSCAN
 		SET DATASESSION TO (lnDs)
+	ENDPROC
+
+	*-- Si el script de una tabla de una conexión lleva los nombres como están en
+	*-- su catálogo: de Firebird o de PostgreSQL, en el dialecto de ese mismo motor.
+	*-- Si no, van como siempre (en minúsculas, y en Firebird en mayúsculas).
+	PROCEDURE UseCatalogNames
+		LPARAMETERS tcEngine, tcDialect
+		RETURN INLIST(tcEngine, "firebird", "postgresql") AND tcDialect == tcEngine
+	ENDPROC
+
+	*-- Los nombres de la tabla tcTable y de sus columnas (el cursor de
+	*-- GetColumns, tcCols) como están en el catálogo, para Q: «CHR(2) minúsculas
+	*-- CHR(1) nombre CHR(2)» por cada uno.
+	PROCEDURE CatalogNames
+		LPARAMETERS tcTable, tcCols
+		LOCAL lcOut, lnDs
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		lcOut = CHR(2) + LOWER(ALLTRIM(tcTable)) + CHR(1) + ALLTRIM(tcTable) + CHR(2)
+		SELECT (tcCols)
+		SCAN
+			lcOut = lcOut + LOWER(ALLTRIM(name)) + CHR(1) + ALLTRIM(name) + CHR(2)
+		ENDSCAN
+		SET DATASESSION TO (lnDs)
+		RETURN lcOut
 	ENDPROC
 
 	*-- La clave de UPDATE y de CREATE TABLE para una tabla remota, la de
@@ -639,6 +720,10 @@ DEFINE CLASS DataScript AS Custom
 	*-- El nombre de una tabla o un campo, entrecomillado como manda el motor.
 	PROCEDURE Q
 		LPARAMETERS tcName, tcDialect
+		*-- Una tabla de Firebird o PostgreSQL en su dialecto: el nombre del catálogo, tal cual.
+		IF !EMPTY(This.cCatNames) AND CHR(2) + LOWER(tcName) + CHR(1) $ This.cCatNames
+			RETURN ["] + STRTRAN(STREXTRACT(This.cCatNames, CHR(2) + LOWER(tcName) + CHR(1), CHR(2)), ["], [""]) + ["]
+		ENDIF
 		RETURN ICASE(tcDialect == "sqlserver", "[" + tcName + "]", tcDialect == "mysql", "`" + tcName + "`", ;
 			tcDialect == "vfp", tcName, tcDialect == "firebird", ["] + UPPER(tcName) + ["], ["] + tcName + ["])
 	ENDPROC
@@ -685,7 +770,8 @@ DEFINE CLASS DataScript AS Custom
 				RETURN ICASE(INLIST(lcT, "C", "V"), "VARCHAR(" + TRANSFORM(lnW) + ")", lcT == "M", "BLOB SUB_TYPE TEXT", ;
 					INLIST(lcT, "N", "F"), "NUMERIC" + IIF(EMPTY(lcNum) AND lnW > 18, "(18," + TRANSFORM(lnD) + ")", lcWD), ;
 					lcT == "I", "INTEGER", lcT == "B", "DOUBLE PRECISION", lcT == "Y", "NUMERIC(18,4)", lcT == "D", "DATE", ;
-					lcT == "T", "TIMESTAMP", lcT == "L", "BOOLEAN", lcT == "Q", "VARCHAR(" + TRANSFORM(lnW) + ") CHARACTER SET OCTETS", ;
+					lcT == "T", "TIMESTAMP", lcT == "L", "BOOLEAN", lcT == "Q", ;
+					IIF("," + LOWER(toT.aCols[tnCol, 1]) + ":CHAR:" $ This.cOctets, "CHAR(", "VARCHAR(") + TRANSFORM(lnW) + ") CHARACTER SET OCTETS", ;
 					"BLOB SUB_TYPE BINARY")
 		ENDCASE
 		RETURN ICASE(INLIST(lcT, "C", "V", "M", "D", "T"), "TEXT", INLIST(lcT, "N", "F", "Y"), "NUMERIC", ;
@@ -838,6 +924,9 @@ DEFINE CLASS DataScript AS Custom
 				IF tcDialect == "firebird"
 					RETURN This.FbString(lcS, lcT == "M")
 				ENDIF
+				IF LEN(CHRTRAN(lcS, This.Ctls(), "")) < LEN(lcS)
+					RETURN This.CtlString(lcS, tcDialect)
+				ENDIF
 				lcS = STRTRAN(lcS, "'", "''")
 				IF tcDialect == "mysql"
 					lcS = STRTRAN(lcS, "\", "\\")
@@ -868,47 +957,180 @@ DEFINE CLASS DataScript AS Custom
 		RETURN IIF(llVfp, ".NULL.", "NULL")
 	ENDPROC
 
-	*-- Un texto en Firebird: cada CRLF como ASCII_CHAR(13) || ASCII_CHAR(10), y
-	*-- el resto en literales de DS_FB_TEXT caracteres como mucho, unidos con ||.
-	*-- En una columna BLOB (tlBlob) con más de un trozo, el primero va en un CAST:
-	*-- el || de dos literales es un VARCHAR, y no pasa de 32.765 bytes.
-	PROCEDURE FbString
-		LPARAMETERS tcS, tlBlob
-		LOCAL loP, lcRest, lcSeg, lnAt, lcOut, lcFirst, llLit
-		loP = CREATEOBJECT("Collection")
-		lcRest = tcS
-		DO WHILE .T.
-			lnAt = AT(CHR(13) + CHR(10), lcRest)
-			lcSeg = IIF(lnAt = 0, lcRest, LEFT(lcRest, lnAt - 1))
-			DO WHILE LEN(lcSeg) > 0
-				loP.Add("'" + STRTRAN(LEFT(lcSeg, DS_FB_TEXT), "'", "''") + "'")
-				lcSeg = SUBSTR(lcSeg, DS_FB_TEXT + 1)
-			ENDDO
-			IF lnAt = 0
-				EXIT
-			ENDIF
-			loP.Add("ASCII_CHAR(13) || ASCII_CHAR(10)")
-			lcRest = SUBSTR(lcRest, lnAt + 2)
-		ENDDO
-		IF loP.Count = 0
-			RETURN "''"
+	*-- Los caracteres de control que no van tal cual dentro de un literal: de
+	*-- CHR(0) a CHR(31) menos el tabulador y los saltos de línea, y CHR(127).
+	PROCEDURE Ctls
+		LOCAL lnI
+		IF EMPTY(This.cCtls)
+			FOR lnI = 0 TO 31
+				IF !INLIST(lnI, 9, 10, 13)
+					This.cCtls = This.cCtls + CHR(lnI)
+				ENDIF
+			ENDFOR
+			This.cCtls = This.cCtls + CHR(127)
 		ENDIF
-		lcFirst = loP.Item(1)
-		llLit = LEFT(lcFirst, 1) == "'"
-		IF loP.Count = 1 AND llLit
-			RETURN lcFirst
-		ENDIF
+		RETURN This.cCtls
+	ENDPROC
+
+	*-- Un texto con caracteres de control (Ctls) en un dialecto SQL que no es
+	*-- Firebird: el texto entre ellos, como literal, y cada uno con la función
+	*-- del motor: NCHAR(n) con + en SQL Server; CHAR(n USING utf8mb4) en un
+	*-- CONCAT en MySQL; chr(n) en PostgreSQL y char(n) en SQLite, con ||. En
+	*-- PostgreSQL y SQLite el CHR(0) sale del valor: un texto de PostgreSQL no lo
+	*-- admite, y uno de SQLite lo guarda pero se lee cortado en él (Script lo
+	*-- dice en la cabecera, NulColumns). En SQL Server, un texto de más de 4.000
+	*-- empieza por un NVARCHAR(MAX), para que la suma no lo corte.
+	PROCEDURE CtlString
+		LPARAMETERS tcS, tcDialect
+		LOCAL lnN, lnI, lnAt, lnA, lcOut, lnCount, lcSep, lcPiece
+		LOCAL ARRAY laR[1]
+		lcSep = ICASE(tcDialect == "sqlserver", " + ", tcDialect == "mysql", ", ", " || ")
 		lcOut = ""
-		FOR EACH lcSeg IN loP
-			lcOut = lcOut + IIF(EMPTY(lcOut), "", " || ") + lcSeg
+		lnCount = 0
+		lnN = ALINES(laR, CHRTRAN(tcS, This.Ctls(), REPLICATE(CHR(0), LEN(This.Ctls()))), 2, CHR(0))
+		lnAt = 0
+		FOR lnI = 1 TO lnN
+			IF LEN(laR[lnI]) > 0
+				lcPiece = STRTRAN(laR[lnI], "'", "''")
+				IF tcDialect == "mysql"
+					lcPiece = STRTRAN(lcPiece, "\", "\\")
+				ENDIF
+				lcOut = lcOut + IIF(lnCount = 0, "", lcSep) + IIF(tcDialect == "sqlserver", "N", "") + "'" + lcPiece + "'"
+				lnCount = lnCount + 1
+			ENDIF
+			lnAt = lnAt + LEN(laR[lnI]) + 1
+			IF lnI < lnN
+				lnA = ASC(SUBSTR(tcS, lnAt, 1))
+				IF lnA > 0 OR !INLIST(tcDialect, "postgresql", "sqlite")
+					lcOut = lcOut + IIF(lnCount = 0, "", lcSep) + ICASE(tcDialect == "sqlserver", "NCHAR(" + TRANSFORM(lnA) + ")", ;
+						tcDialect == "mysql", "CHAR(" + TRANSFORM(lnA) + " USING utf8mb4)", tcDialect == "postgresql", ;
+						"chr(" + TRANSFORM(lnA) + ")", "char(" + TRANSFORM(lnA) + ")")
+					lnCount = lnCount + 1
+				ENDIF
+			ENDIF
 		ENDFOR
 		DO CASE
-			CASE !tlBlob
-				RETURN lcOut
-			CASE llLit
-				RETURN "CAST(" + lcFirst + " AS BLOB SUB_TYPE TEXT)" + SUBSTR(lcOut, LEN(lcFirst) + 1)
+			CASE lnCount = 0
+				RETURN IIF(tcDialect == "sqlserver", "N''", "''")
+			CASE tcDialect == "mysql"
+				RETURN IIF(lnCount = 1, lcOut, "CONCAT(" + lcOut + ")")
+			CASE tcDialect == "sqlserver" AND LEN(tcS) > 4000
+				RETURN "CAST(N'' AS NVARCHAR(MAX)) + " + lcOut
 		ENDCASE
-		RETURN "CAST('' AS BLOB SUB_TYPE TEXT) || " + lcOut
+		RETURN lcOut
+	ENDPROC
+
+	*-- Las columnas de texto de toT con un CHR(0) en alguna fila, separadas por
+	*-- comas: las que pierden el CHR(0) en PostgreSQL y SQLite (CtlString).
+	PROCEDURE NulColumns
+		LPARAMETERS toT
+		LOCAL lnI, lcOut, lcF, lnDs
+		lcOut = ""
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		SELECT (toT.cAlias)
+		FOR lnI = 1 TO toT.nCols
+			IF INLIST(toT.aCols[lnI, 2], "C", "V", "M")
+				lcF = toT.aCols[lnI, 1]
+				LOCATE FOR CHR(0) $ NVL(&lcF, "")
+				IF FOUND()
+					lcOut = lcOut + IIF(EMPTY(lcOut), "", ", ") + lcF
+				ENDIF
+			ENDIF
+		ENDFOR
+		SET DATASESSION TO (lnDs)
+		RETURN lcOut
+	ENDPROC
+
+	*-- Un texto en Firebird: cada CRLF como ASCII_CHAR(13) || ASCII_CHAR(10), y
+	*-- el resto en literales de DS_FB_TEXT caracteres como mucho, unidos con ||;
+	*-- cada carácter de control (Ctls), como ASCII_CHAR(n).
+	*-- En una columna BLOB (tlBlob) con más de un trozo, el primero va en un CAST:
+	*-- el || de dos literales es un VARCHAR, y no pasa de 32.765 bytes.
+	*-- Lineal: las líneas salen de ALINES, cada trozo se toma por su posición, y
+	*-- los que siguen al primero se juntan en un búfer que, al pasar de
+	*-- DS_FB_BUF, va a un fichero temporal (FWRITE) en vez de crecer.
+	PROCEDURE FbString
+		LPARAMETERS tcS, tlBlob
+		LOCAL lnN, lnI, lnP, lnLen, lcLine, lcPiece, lcFirst, lnCount, lcBuf, lcTmp, lnH, lcRest, lnC, lnR, lnAt
+		LOCAL ARRAY laL[1], laR[1]
+		IF LEN(tcS) <= DS_FB_TEXT AND !(CHR(13) + CHR(10) $ tcS) AND LEN(CHRTRAN(tcS, This.Ctls(), "")) = LEN(tcS)
+			RETURN "'" + STRTRAN(tcS, "'", "''") + "'"
+		ENDIF
+		lnN = ALINES(laL, tcS, 2, CHR(13) + CHR(10))
+		lcFirst = ""
+		lnCount = 0
+		lcBuf = ""
+		lnH = -1
+		lcTmp = ""
+		FOR lnI = 1 TO lnN
+			IF lnI > 1
+				lnCount = This.FbPiece("ASCII_CHAR(13) || ASCII_CHAR(10)", lnCount, @lcFirst, @lcBuf, @lnH, @lcTmp)
+			ENDIF
+			lcLine = laL[lnI]
+			IF LEN(CHRTRAN(lcLine, This.Ctls(), "")) = LEN(lcLine)
+				lnLen = LEN(lcLine)
+				FOR lnP = 1 TO lnLen STEP DS_FB_TEXT
+					lnCount = This.FbPiece("'" + STRTRAN(SUBSTR(lcLine, lnP, DS_FB_TEXT), "'", "''") + "'", lnCount, @lcFirst, @lcBuf, @lnH, @lcTmp)
+				ENDFOR
+				LOOP
+			ENDIF
+			*-- Con caracteres de control: cada uno, ASCII_CHAR(n); el texto entre ellos, a trozos.
+			lnC = ALINES(laR, CHRTRAN(lcLine, This.Ctls(), REPLICATE(CHR(0), LEN(This.Ctls()))), 2, CHR(0))
+			lnAt = 0
+			FOR lnR = 1 TO lnC
+				lnLen = LEN(laR[lnR])
+				FOR lnP = 1 TO lnLen STEP DS_FB_TEXT
+					lnCount = This.FbPiece("'" + STRTRAN(SUBSTR(laR[lnR], lnP, DS_FB_TEXT), "'", "''") + "'", lnCount, @lcFirst, @lcBuf, @lnH, @lcTmp)
+				ENDFOR
+				lnAt = lnAt + lnLen + 1
+				IF lnR < lnC
+					lnCount = This.FbPiece("ASCII_CHAR(" + TRANSFORM(ASC(SUBSTR(lcLine, lnAt, 1))) + ")", lnCount, @lcFirst, @lcBuf, @lnH, @lcTmp)
+				ENDIF
+			ENDFOR
+		ENDFOR
+		lcRest = lcBuf
+		IF lnH > 0
+			=FCLOSE(lnH)
+			TRY
+				lcRest = FILETOSTR(lcTmp) + lcBuf
+			FINALLY
+				ERASE (lcTmp)
+			ENDTRY
+		ENDIF
+		DO CASE
+			CASE lnCount = 0
+				RETURN "''"
+			CASE lnCount = 1 AND LEFT(lcFirst, 1) == "'"
+				RETURN lcFirst
+			CASE !tlBlob
+				RETURN lcFirst + lcRest
+			CASE LEFT(lcFirst, 1) == "'"
+				RETURN "CAST(" + lcFirst + " AS BLOB SUB_TYPE TEXT)" + lcRest
+		ENDCASE
+		RETURN "CAST('' AS BLOB SUB_TYPE TEXT) || " + lcFirst + lcRest
+	ENDPROC
+
+	*-- Un trozo de FbString: el primero, en tcFirst; los demás, con « || »
+	*-- delante, en el búfer, que pasa al fichero temporal cuando crece.
+	*-- Devuelve cuántos trozos van.
+	PROTECTED PROCEDURE FbPiece
+		LPARAMETERS tcPiece, tnCount, tcFirst, tcBuf, tnH, tcTmp
+		IF tnCount = 0
+			tcFirst = tcPiece
+			RETURN 1
+		ENDIF
+		tcBuf = tcBuf + " || " + tcPiece
+		IF LEN(tcBuf) > DS_FB_BUF
+			IF tnH < 0 AND EMPTY(tcTmp)
+				tcTmp = ADDBS(SYS(2023)) + "fdfb" + SYS(2015) + ".tmp"
+				tnH = FCREATE(tcTmp)
+			ENDIF
+			IF tnH > 0 AND FWRITE(tnH, tcBuf) = LEN(tcBuf)
+				tcBuf = ""
+			ENDIF
+		ENDIF
+		RETURN tnCount + 1
 	ENDPROC
 
 	*-- Un binario en Firebird (tcHex, sus cifras): x'...' de DS_FB_BIN bytes como
@@ -956,7 +1178,7 @@ DEFINE CLASS DataScript AS Custom
 		FOR lnI = 1 TO LEN(tcS)
 			lcC = SUBSTR(tcS, lnI, 1)
 			IF ASC(lcC) < 32
-				IF !EMPTY(lcRun)
+				IF LEN(lcRun) > 0
 					loOut.Add(This.Delimit(lcRun))
 					lcRun = ""
 				ENDIF

@@ -99,11 +99,21 @@ Wie jeder Wert herauskommt:
 | `G` General | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit |
 
 Bei einer Tabelle einer Verbindung (**Erkunden...** > **Skript als...**) ist der Typ der VFP-Buchstabe, mit dem sie vom Server
-kommt (der `type` von `ide_data_db_describe`): `bigint`, `uniqueidentifier` und `time` von SQL Server kommen als Text und
-`varbinary` als Memo, und so gehen sie. Ein `varchar(max)` oder `nvarchar(max)` kommt als `C(0)` und geht als Memo. Eine Spalte
-des Primärschlüssels ist `NOT NULL`, auch wenn die Datenbank sagt, dass sie NULL erlaubt (SQLite). Aus Firebird kommen
-`BIGINT`, `INT128` und ein `NUMERIC` mit mehr als 18 Stellen als Text, `TIME` als Datum und Uhrzeit vom 30.12.1899,
-und ein binäres `BLOB` als General, das ausgelassen wird.
+kommt (der `type` von `ide_data_db_describe`): `bigint`, `uniqueidentifier` und `time` von SQL Server kommen als Text, und so
+gehen sie. Ein Binärwert kommt als Binärwert, wie bei allem, was FoxDock aus einer Verbindung liest (**Abfrage...**,
+**Erkunden...**, die Tools des Agenten und **Queries**): `binary`, `varbinary` und `rowversion` als `Q`, und `image`,
+`varbinary(max)`, ein `BLOB` oder ein `bytea` als `W`, mit ihren Bytes. Ein `varchar(max)` oder `nvarchar(max)` kommt als
+`C(0)` und geht als Memo; ein `varbinary(max)` wird noch einmal gelesen, damit es als `W` kommt, und geht als `VARBINARY(MAX)`.
+Eine Spalte des Primärschlüssels ist `NOT NULL`, auch wenn die Datenbank sagt, dass sie NULL erlaubt (SQLite). Aus Firebird
+kommen `BIGINT`, `INT128` und ein `NUMERIC` mit mehr als 18 Stellen als Text, `TIME` als Datum und Uhrzeit vom 30.12.1899,
+und ein binäres `BLOB` als `W`. **Erkunden...** und **Skript als...** lesen ein `CHAR` oder `VARCHAR … CHARACTER SET OCTETS`
+als Binärwert, und es geht als `CHAR(n)` oder `VARCHAR(n) CHARACTER SET OCTETS`; mit **Abfrage...** kommt es weiter als Text. In MySQL und MariaDB wird ein `LONGTEXT` oder ein `JSON` mit `CAST(x AS CHAR(16777215))` noch einmal
+gelesen und kommt ganz, als Memo; mit **Abfrage...** und einem eigenen SQL kommt er bei 255 Zeichen abgeschnitten, wie ein
+`varchar(max)` von SQL Server. Eine Tabelle von Firebird oder PostgreSQL, im Dialekt ihrer eigenen Datenbank als Skript,
+behält die Namen ihres Katalogs: eine kleingeschriebene Tabelle von Firebird oder eine großgeschriebene von PostgreSQL wird
+mit ihrem Namen neu angelegt.
+Eine Spalte, die noch als General kommt, steht im `CREATE TABLE` mit ihrem Typ, und der Kommentar oben sagt, dass ihr Inhalt
+nicht ins Skript kommt. Im JSON von `ide_data_db_query` und `ide_queries_run` gehen Varbinary und Blob in Base64.
 
 Was keine Entsprechung hat, und was damit geschieht:
 
@@ -118,6 +128,15 @@ Was keine Entsprechung hat, und was damit geschieht:
   weil isql den eines Literals als LF speichert. Ein Text mit mehr als 20.000 Zeichen oder ein Binärwert mit mehr
   als 30.000 Bytes geht in Stücken, mit `||` verbunden, und in einem Memo oder einem Blob steht das erste in einem
   `CAST`. Eine Anweisung von Firebird darf nicht über 10.485.760 Bytes, ein größerer Wert passt also nicht.
+- Ein Steuerzeichen in einem Text (von `CHR(0)` bis `CHR(31)`, außer dem Tabulator und den Zeilenumbrüchen, und
+  `CHR(127)`) geht mit der Funktion der Datenbank, damit die `.sql` Text bleibt und der Wert mit denselben Bytes
+  zurückkommt: `NCHAR(n)` in SQL Server, `CHAR(n USING utf8mb4)` in einem `CONCAT` in MySQL, `chr(n)` in PostgreSQL,
+  `char(n)` in SQLite und `ASCII_CHAR(n)` in Firebird. PostgreSQL nimmt kein `CHR(0)` in einem Text, und SQLite speichert
+  es, liest den Text aber nur bis dorthin: in diesen beiden wird es aus dem Wert genommen, und ein Kommentar am Anfang
+  des Skripts nennt die Spalten.
+- Eine Zeile, deren Anweisung nicht passt (eine Zeichenkette von VFP hat höchstens 16.777.184 Zeichen, eine Anweisung
+  von Firebird 10.485.760 Bytes), geht als Kommentar, der sagt warum; die anderen Zeilen werden geschrieben, und die
+  Meldung sagt, wie viele ausgelassen wurden.
 - Im VFP-Dialekt geht eine Zeichenkette in Stücken von 200 Zeichen, mit `+` verbunden (ein Literal darf
   nicht über 255), Steuerzeichen als `CHR(n)`, und ein Wert mit mehr als 1000 Zeichen geht leer in die
   Anweisung und wird danach stückweise angehängt (`REPLACE` nach einem `INSERT`, `UPDATE` nach einem `UPDATE`).

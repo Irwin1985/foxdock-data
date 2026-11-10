@@ -58,7 +58,8 @@
 * la conexión viva sin PWD, con DispLogin 1 para que USE la pida en la
 * ventana del driver; mientras se crea la vista, la contraseña va en un .dsn
 * temporal que se borra al acabar. Los varchar van como V (MapVarchar): con
-* el relleno, en SQLite fallaba el TABLEUPDATE. Con contraseña, la vista se
+* el relleno, en SQLite fallaba el TABLEUPDATE. Los binarios, como Q y W
+* (MapBinary), como en todo lo que se lee de una conexión. Con contraseña, la vista se
 * abre con USE ... CONNSTRING; la ventanita enseña la línea.
 *
 * Query... lee como mucho las filas de su límite: 100 de entrada, 0 = sin
@@ -890,7 +891,7 @@ DEFINE CLASS DataConnections AS Custom
 		SET DATASESSION TO 1
 		lcErr = ""
 		TRY
-			llOk = loDb.GetColumns(lcName, tcCursor)
+			llOk = This.BinaryRead(loDb, "columns", lcName, tcCursor)
 		CATCH TO loErr
 			llOk = .F.
 			lcErr = TRANSFORM(loErr.ErrorNo) + " " + loErr.Message
@@ -903,6 +904,112 @@ DEFINE CLASS DataConnections AS Custom
 			RETURN ""
 		ENDIF
 		RETURN lcName
+	ENDPROC
+
+	*-- Lo que se lee de una conexión, con los binarios como binarios: el
+	*-- SELECT (tcHow "query", tcArg la sentencia) o las columnas de una tabla
+	*-- (tcHow "columns", tcArg su nombre) en tcAlias, con MapBinary puesto en la
+	*-- sesión en curso (la 1, la del foxero): SQL_BINARY, SQL_VARBINARY y
+	*-- SQL_LONGVARBINARY llegan como Varbinary o Blob, y no como Character o
+	*-- General. El valor que tuviera se devuelve siempre, también si la lectura
+	*-- falla, como CreateView hace con MapVarchar. Por aquí pasan Query y
+	*-- GetColumns a la vez: si no, el CREATE y el INSERT de un script no casan.
+	PROCEDURE BinaryRead
+		LPARAMETERS toDb, tcHow, tcArg, tcAlias
+		LOCAL llMap, llOk
+		llMap = CURSORGETPROP("MapBinary", 0)
+		TRY
+			=CURSORSETPROP("MapBinary", .T., 0)
+			IF tcHow == "columns"
+				llOk = toDb.GetColumns(tcArg, tcAlias)
+			ELSE
+				llOk = toDb.Query(tcArg, tcAlias)
+			ENDIF
+		FINALLY
+			=CURSORSETPROP("MapBinary", llMap, 0)
+		ENDTRY
+		RETURN llOk
+	ENDPROC
+
+	*-- Las columnas OCTETS (CHAR o VARCHAR ... CHARACTER SET OCTETS) de la tabla
+	*-- tcTable de Firebird, del catálogo del servidor: el driver las da como
+	*-- texto, y MapBinary no las toca. «,nombre:CHAR:n,nombre:VARCHAR:n,», con
+	*-- el nombre en minúsculas; vacío si no hay o no se pudo leer.
+	PROCEDURE FbOctets
+		LPARAMETERS tnHandle, tcTable
+		LOCAL lnDs, lcOut, lcCur, loErr
+		lcOut = ""
+		lcCur = "FDO" + SYS(2015)
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		TRY
+			IF SQLEXEC(tnHandle, "SELECT TRIM(rf.RDB$FIELD_NAME) AS fname, f.RDB$FIELD_TYPE AS ftype, f.RDB$FIELD_LENGTH AS flen " + ;
+					"FROM RDB$RELATION_FIELDS rf JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE " + ;
+					"WHERE rf.RDB$RELATION_NAME = '" + STRTRAN(tcTable, "'", "''") + "' AND f.RDB$CHARACTER_SET_ID = 1 " + ;
+					"AND f.RDB$FIELD_TYPE IN (14, 37)", lcCur) > 0 AND USED(lcCur)
+				SELECT (lcCur)
+				SCAN
+					lcOut = lcOut + "," + LOWER(ALLTRIM(TRANSFORM(fname))) + ":" + IIF(VAL(TRANSFORM(ftype)) = 14, "CHAR", "VARCHAR") + ;
+						":" + TRANSFORM(INT(VAL(TRANSFORM(flen))))
+				ENDSCAN
+			ENDIF
+		CATCH TO loErr
+			lcOut = ""
+		ENDTRY
+		IF USED(lcCur)
+			USE IN (lcCur)
+		ENDIF
+		SET DATASESSION TO (lnDs)
+		RETURN IIF(EMPTY(lcOut), "", lcOut + ",")
+	ENDPROC
+
+	*-- Con qué tipo vuelve a leer TableSelect una columna, o "" si no hace falta.
+	*-- tcList, según el motor: las columnas OCTETS de Firebird (FbOctets) o los
+	*-- textos largos de MySQL y MariaDB (MyLongText). En SQL Server, un
+	*-- (n)varchar(max) que llega como C(0) va por TEXT, y un varbinary(max) que
+	*-- llega como Q(0), por IMAGE.
+	PROCEDURE ReadCast
+		LPARAMETERS tcEngine, tcType, tnWidth, tcName, tcList
+		DO CASE
+			CASE tcEngine == "firebird"
+				RETURN IIF("," + tcName + ":" $ tcList, "BLOB SUB_TYPE BINARY", "")
+			CASE INLIST(tcEngine, "mysql", "mariadb")
+				RETURN IIF("," + tcName + "," $ tcList, "CHAR(16777215)", "")
+			CASE tcEngine == "sqlserver" AND tcType == "C" AND tnWidth = 0
+				RETURN "TEXT"
+			CASE tcEngine == "sqlserver" AND tcType == "Q" AND tnWidth = 0
+				RETURN "IMAGE"
+		ENDCASE
+		RETURN ""
+	ENDPROC
+
+	*-- Las columnas LONGTEXT y JSON de la tabla tcTable de MySQL o MariaDB, del
+	*-- catálogo: el driver da su tamaño como -1 y VFP las corta en un C(255) (o
+	*-- C(252)); con CAST(x AS CHAR(16777215)) llegan como memo, enteras.
+	*-- «,nombre,», en minúsculas; vacío si no hay o no se pudo leer.
+	PROCEDURE MyLongText
+		LPARAMETERS tnHandle, tcTable
+		LOCAL lnDs, lcOut, lcCur, loErr
+		lcOut = ""
+		lcCur = "FDL" + SYS(2015)
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		TRY
+			IF SQLEXEC(tnHandle, "SELECT COLUMN_NAME AS cname FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() " + ;
+					"AND TABLE_NAME = '" + STRTRAN(tcTable, "'", "''") + "' AND DATA_TYPE IN ('longtext', 'json')", lcCur) > 0 AND USED(lcCur)
+				SELECT (lcCur)
+				SCAN
+					lcOut = lcOut + "," + LOWER(ALLTRIM(TRANSFORM(cname)))
+				ENDSCAN
+			ENDIF
+		CATCH TO loErr
+			lcOut = ""
+		ENDTRY
+		IF USED(lcCur)
+			USE IN (lcCur)
+		ENDIF
+		SET DATASESSION TO (lnDs)
+		RETURN IIF(EMPTY(lcOut), "", lcOut + ",")
 	ENDPROC
 
 	*-- Un SELECT en el cursor tcAlias (sesión 1), con tnMax filas como mucho
@@ -938,7 +1045,7 @@ DEFINE CLASS DataConnections AS Custom
 		=CURSORSETPROP("MaxRecords", IIF(tnMax > 0, tnMax + 1, -1), 0)
 		lcErr = ""
 		TRY
-			llOk = loDb.Query(loG.cSql, tcAlias)
+			llOk = This.BinaryRead(loDb, "query", loG.cSql, tcAlias)
 		CATCH TO loErr
 			llOk = .F.
 			lcErr = TRANSFORM(loErr.ErrorNo) + " " + loErr.Message
@@ -1461,7 +1568,7 @@ DEFINE CLASS DataConnections AS Custom
 		lcTmp = "FDC" + SYS(2015)
 		lnDs = SET("DATASESSION")
 		SET DATASESSION TO 1
-		llOk = loDb.GetColumns(lcName, lcTmp)
+		llOk = This.BinaryRead(loDb, "columns", lcName, lcTmp)
 		IF llOk
 			lcKey = loDb.GetPrimaryKey(lcName)
 			lnN = RECCOUNT(lcTmp)
@@ -1619,10 +1726,15 @@ DEFINE CLASS DataConnections AS Custom
 	*-- clave primaria si la tiene, para que «las N primeras» sean siempre las
 	*-- mismas (sin ORDER BY, SQL Server las da en cualquier orden). En SQL
 	*-- Server, un (n)varchar(max) llega como C(0), vacío: se vuelve a leer con
-	*-- CAST(CAST(x AS VARCHAR(MAX)) AS TEXT), como hace el Open() de FoxRemote.
+	*-- CAST(CAST(x AS VARCHAR(MAX)) AS TEXT), como hace el Open() de FoxRemote;
+	*-- y un varbinary(max), como Q(0), vacío: con CAST(x AS IMAGE), que llega
+	*-- como W. En Firebird, las columnas OCTETS (FbOctets) llegan como texto: se
+	*-- vuelven a leer con CAST(x AS BLOB SUB_TYPE BINARY), que llega como W con
+	*-- sus bytes y sin el relleno de un C. En MySQL y MariaDB, un LONGTEXT o un
+	*-- JSON llega como C(255) cortado: se vuelve a leer con CAST(x AS CHAR(16777215)).
 	PROCEDURE TableSelect
 		LPARAMETERS tcId, tcName, tnMax, tcAlias
-		LOCAL loC, loDb, lcKey, lcOrder, lcCols, llLong, laF[1], lnN, lnI, lnDs, lcFrom, lcK, loErr
+		LOCAL loC, loDb, lcKey, lcOrder, lcCols, llLong, laF[1], lnN, lnI, lnDs, lcFrom, lcK, loErr, lcOct, lcCast
 		loC = This.Find(tcId)
 		IF !This.Ready(loC.cId)
 			RETURN .F.
@@ -1647,20 +1759,40 @@ DEFINE CLASS DataConnections AS Custom
 		IF !This.Query(loC.cId, "SELECT *" + lcFrom, tnMax, tcAlias)
 			RETURN .F.
 		ENDIF
-		IF loC.cEngine # "sqlserver"
-			RETURN .T.
-		ENDIF
+		DO CASE
+			CASE loC.cEngine == "sqlserver"
+				lcOct = ""
+			CASE loC.cEngine == "firebird"
+				lcOct = This.FbOctets(loDb.nHandle, tcName)
+				IF EMPTY(lcOct)
+					RETURN .T.
+				ENDIF
+			CASE INLIST(loC.cEngine, "mysql", "mariadb")
+				lcOct = This.MyLongText(loDb.nHandle, tcName)
+				IF EMPTY(lcOct)
+					RETURN .T.
+				ENDIF
+			OTHERWISE
+				RETURN .T.
+		ENDCASE
 		SET DATASESSION TO 1
 		lnN = AFIELDS(laF, tcAlias)
 		SET DATASESSION TO (lnDs)
 		lcCols = ""
 		llLong = .F.
 		FOR lnI = 1 TO lnN
-			IF laF[lnI, 2] == "C" AND laF[lnI, 3] = 0
+			lcCast = This.ReadCast(loC.cEngine, laF[lnI, 2], laF[lnI, 3], LOWER(laF[lnI, 1]), lcOct)
+			IF lcCast == "TEXT"
 				llLong = .T.
 				lcCols = lcCols + IIF(lnI = 1, "", ", ") + "CAST(CAST(" + This.Quoted(loC.cEngine, laF[lnI, 1]) + ;
 					" AS VARCHAR(MAX)) AS TEXT) AS " + This.Quoted(loC.cEngine, laF[lnI, 1])
 			ELSE
+				IF !EMPTY(lcCast)
+					llLong = .T.
+					lcCols = lcCols + IIF(lnI = 1, "", ", ") + "CAST(" + This.Quoted(loC.cEngine, laF[lnI, 1]) + " AS " + lcCast + ;
+						") AS " + This.Quoted(loC.cEngine, laF[lnI, 1])
+					LOOP
+				ENDIF
 				lcCols = lcCols + IIF(lnI = 1, "", ", ") + This.Quoted(loC.cEngine, laF[lnI, 1])
 			ENDIF
 		ENDFOR
@@ -1756,7 +1888,7 @@ DEFINE CLASS DataConnections AS Custom
 	*-- vista con ese nombre se borra y se hace otra vez. .T. si la hizo.
 	PROCEDURE CreateView
 		LPARAMETERS toF, tcTable, tcDbc, tcView, tcCols, tcWhere, tlUpdatable, tlReplace
-		LOCAL loC, loDb, lcName, lcWhy, lcKey, lcCs, lcNo, lcConn, lcSql, lnI, lcCol, lnDs, lcOldDbc, llOpened, llMap, lcCmd
+		LOCAL loC, loDb, lcName, lcWhy, lcKey, lcCs, lcNo, lcConn, lcSql, lnI, lcCol, lnDs, lcOldDbc, llOpened, llMap, lcCmd, llBin
 		LOCAL loErr, lcErr, lnH, laF[1], lnN, lcField, llPwd, lnTry, lcMemo, llExists, llServer, llInUse, llReplaced, lcDsn, lcUse
 		LOCAL lcProbe, llProbe, laE[1]
 		loC = This.Find(toF.cConnId)
@@ -1813,6 +1945,7 @@ DEFINE CLASS DataConnections AS Custom
 		llOpened = .F.
 		lcErr = ""
 		llMap = CURSORGETPROP("MapVarchar", 0)
+		llBin = CURSORGETPROP("MapBinary", 0)
 		lcConn = ""
 		lcMemo = ""
 		TRY
@@ -1886,12 +2019,14 @@ DEFINE CLASS DataConnections AS Custom
 			ENDIF
 			=DBSETPROP(lcConn, "Connection", "DispLogin", 3)
 			=CURSORSETPROP("MapVarchar", .T., 0)
+			=CURSORSETPROP("MapBinary", .T., 0)
 			lcCmd = "CREATE SQL VIEW " + tcView + " REMOTE CONNECTION " + lcConn + " AS " + lcSql
 			&lcCmd
 		CATCH TO loErr
 			lcErr = IIF(loErr.ErrorNo = 1098, loErr.Message, TRANSFORM(loErr.ErrorNo) + " " + loErr.Message)
 		FINALLY
 			=CURSORSETPROP("MapVarchar", llMap, 0)
+			=CURSORSETPROP("MapBinary", llBin, 0)
 			*-- La cadena sin la contraseña pase lo que pase, y el .dsn, borrado.
 			*-- DispLogin 1 en su conexión del .dbc, la nueva o la de antes: USE a secas
 			*-- y Modify en el diseñador piden la contraseña en la ventana del driver en
@@ -2213,9 +2348,11 @@ DEFINE CLASS DataConnections AS Custom
 				=This.oHost.Editor.Open(lcFile)
 			ENDIF
 			lcText = This.T("data.script.done", loR.cName, loS.KindName(tcKind), loS.DialectName(tcDialect), lcRows, ;
-				This.T("data.inFile", lcFile), IIF(EMPTY(loR.cSkipped), "", This.T("data.skippedGeneral", loR.cSkipped)))
+				This.T("data.inFile", lcFile), IIF(EMPTY(loR.cSkipped), "", This.T("data.skippedGeneral", loR.cSkipped)) + ;
+				IIF(loR.nLeftOut = 0, "", This.T("data.leftOutRows", TRANSFORM(loR.nLeftOut))))
 			lcTextEn = This.E("data.script.done", loR.cName, loS.KindName(tcKind), loS.DialectName(tcDialect), lcRowsEn, ;
-				This.E("data.inFile", lcFile), IIF(EMPTY(loR.cSkipped), "", This.E("data.skippedGeneral", loR.cSkipped)))
+				This.E("data.inFile", lcFile), IIF(EMPTY(loR.cSkipped), "", This.E("data.skippedGeneral", loR.cSkipped)) + ;
+				IIF(loR.nLeftOut = 0, "", This.E("data.leftOutRows", TRANSFORM(loR.nLeftOut))))
 		ENDIF
 		toF.edtSay.Value = lcText
 		This.oHost.Notify(lcText, lcTextEn)
@@ -2305,7 +2442,7 @@ DEFINE CLASS DataConnections AS Custom
 		SET DATASESSION TO 1
 		IF tcFormat == "json"
 			loDb = This.Live(loC.cId)
-			IF loDb.GetColumns(lcName, lcCols)
+			IF This.BinaryRead(loDb, "columns", lcName, lcCols)
 				lnCols = RECCOUNT(lcCols)
 			ELSE
 				IF USED(lcTmp)
@@ -4489,7 +4626,7 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		ENDIF
 		lnDs = SET("DATASESSION")
 		SET DATASESSION TO 1
-		llOk = loDb.GetColumns(tcTable, tcCur)
+		llOk = toModule.BinaryRead(loDb, "columns", tcTable, tcCur)
 		SET DATASESSION TO (lnDs)
 		RETURN llOk
 	ENDPROC

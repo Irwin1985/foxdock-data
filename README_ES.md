@@ -97,10 +97,20 @@ Cómo sale cada valor:
 | `G` General | no sale | no sale | no sale | no sale | no sale | no sale |
 
 De una tabla de una conexión (**Explorar...** > **Script como...**), el tipo es la letra de VFP con la que llega del servidor
-(el `type` de `ide_data_db_describe`): `bigint`, `uniqueidentifier` y `time` de SQL Server llegan como texto, y `varbinary`
-como memo, y así van. Un `varchar(max)` o `nvarchar(max)` llega como `C(0)` y va como memo. Una columna de la clave primaria va
-`NOT NULL`, aunque el motor diga que admite nulos (SQLite). De Firebird, `BIGINT`, `INT128` y un `NUMERIC` de más de 18
-cifras llegan como texto, `TIME` llega como fecha y hora del 30-12-1899, y un `BLOB` binario llega como General y se salta.
+(el `type` de `ide_data_db_describe`): `bigint`, `uniqueidentifier` y `time` de SQL Server llegan como texto, y así van. Un
+binario llega como binario, como en todo lo que FoxDock lee de una conexión (**Consulta...**, **Explorar...**, las tools del
+agente y **Queries**): `binary`, `varbinary` y `rowversion` como `Q`, e `image`, `varbinary(max)`, un `BLOB` o un `bytea` como
+`W`, con sus bytes. Un `varchar(max)` o `nvarchar(max)` llega como `C(0)` y va como memo; un `varbinary(max)` se vuelve a leer
+para que llegue como `W`, y va como `VARBINARY(MAX)`. Una columna de la clave primaria va `NOT NULL`, aunque el motor diga que
+admite nulos (SQLite). De Firebird, `BIGINT`, `INT128` y un `NUMERIC` de más de 18 cifras llegan como texto, `TIME` llega como
+fecha y hora del 30-12-1899, y un `BLOB` binario llega como `W`. **Explorar...** y **Script como...** leen un `CHAR` o
+`VARCHAR … CHARACTER SET OCTETS` como binario, y va como `CHAR(n)` o `VARCHAR(n) CHARACTER SET OCTETS`; con **Consulta...**
+sigue llegando como texto. En MySQL y MariaDB un `LONGTEXT` o un `JSON` se vuelve a leer con `CAST(x AS CHAR(16777215))`, así
+que llega entero, como memo; con **Consulta...** y un SQL escrito a mano llega cortado a 255 caracteres, como un
+`varchar(max)` de SQL Server. Una tabla de Firebird o de PostgreSQL scriptada en el dialecto de su motor lleva los nombres
+de su catálogo, así que una tabla en minúsculas de Firebird o en mayúsculas de PostgreSQL se vuelve a crear con su nombre. Una columna que aún llega como General está en el `CREATE TABLE` con su tipo, y el comentario de
+arriba dice que su contenido no se scripta. En el JSON de `ide_data_db_query` y de `ide_queries_run`, Varbinary y Blob van en
+base64.
 
 Lo que no tiene equivalente, y qué se hace con ello:
 
@@ -115,6 +125,14 @@ Lo que no tiene equivalente, y qué se hace con ello:
   en LF el de un literal. Un texto de más de 20.000 caracteres o un binario de más de 30.000 bytes va a trozos
   unidos con `||`, y en un memo o un Blob el primero va dentro de un `CAST`. Una sentencia de Firebird no pasa de
   10.485.760 bytes, así que un valor mayor no cabe.
+- Un carácter de control de un texto (de `CHR(0)` a `CHR(31)`, menos el tabulador y los saltos de línea, y `CHR(127)`)
+  va con la función del motor, así que el `.sql` sigue siendo texto y el valor vuelve con los mismos bytes: `NCHAR(n)`
+  en SQL Server, `CHAR(n USING utf8mb4)` dentro de un `CONCAT` en MySQL, `chr(n)` en PostgreSQL, `char(n)` en SQLite y
+  `ASCII_CHAR(n)` en Firebird. PostgreSQL no admite un `CHR(0)` en un texto, y SQLite lo guarda pero lee el texto
+  cortado en él: en esos dos sale del valor, y un comentario al principio del script nombra las columnas.
+- Una fila cuya sentencia no cabe (una cadena de VFP tiene como mucho 16.777.184 caracteres, y una sentencia de
+  Firebird 10.485.760 bytes) va como un comentario que dice por qué, las demás filas se escriben, y el aviso dice
+  cuántas se quedaron fuera.
 - En el dialecto VFP una cadena va a trozos de 200 caracteres unidos con `+` (un literal no pasa de
   255), los caracteres de control como `CHR(n)`, y un valor de más de 1000 caracteres va vacío en la
   sentencia y se añade detrás a trozos (`REPLACE` tras un `INSERT`, `UPDATE` tras un `UPDATE`).
