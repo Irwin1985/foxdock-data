@@ -125,8 +125,8 @@ Was keine Entsprechung hat, und was damit geschieht:
 ### Die Verbindungen
 
 **FoxDock > Daten > Verbindungen** (FoxDock > Data > Connections) speichert die Verbindungen zu Ihren Datenbankservern (SQL Server, MySQL,
-MariaDB, PostgreSQL, Firebird und SQLite) und öffnet sie aus der IDE, über FoxRemote (eine Kopie davon
-liegt unverändert im Paket). Jede Verbindung ist ein Menüpunkt mit einem eigenen Untermenü:
+MariaDB, PostgreSQL, Firebird und SQLite) und öffnet sie aus der IDE, über FoxRemote (eine Bibliothek, die das Paket
+mit `requires` anfordert: sie liegt unverändert in `lib\foxremote\`). Jede Verbindung ist ein Menüpunkt mit einem eigenen Untermenü:
 
 | Menüpunkt | Was er tut |
 |---|---|

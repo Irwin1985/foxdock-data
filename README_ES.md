@@ -122,8 +122,8 @@ Lo que no tiene equivalente, y qué se hace con ello:
 ### Las conexiones
 
 **FoxDock > Datos > Conexiones** (FoxDock > Data > Connections) guarda las conexiones a tus servidores de bases de datos (SQL Server,
-MySQL, MariaDB, PostgreSQL, Firebird y SQLite) y las abre desde el IDE, por FoxRemote (una copia suya va
-dentro del paquete, sin tocar). Cada conexión es una barra con su submenú:
+MySQL, MariaDB, PostgreSQL, Firebird y SQLite) y las abre desde el IDE, por FoxRemote (una librería que el paquete pide
+con `requires`: llega sin tocar en `lib\foxremote\`). Cada conexión es una barra con su submenú:
 
 | Barra | Qué hace |
 |---|---|

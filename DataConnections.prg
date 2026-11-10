@@ -82,10 +82,11 @@
 * pregunta nada: sin la contraseña guardada, contesta que hace falta
 * Connect... en el IDE.
 *
-* FoxRemote va en DataFoxRemote.prg, una copia sin tocar de foxremote.prg.
-* Sus clases se crean con NEWOBJECT desde ese fichero, que nunca entra en SET
-* PROCEDURE: así no tapa el foxremote.prg de un proyecto del usuario que
-* tenga clases con los mismos nombres.
+* FoxRemote es una librería que el plugin pide con requires: FoxPack la deja
+* en lib\foxremote\. Sus clases se crean con NEWOBJECT desde su foxremote.prg
+* de la caché del código (CodeFile), que nunca entra en SET PROCEDURE: así no
+* tapa el foxremote.prg de un proyecto del usuario que tenga clases con los
+* mismos nombres, y FoxDock puede actualizar el plugin estando abierto.
 *==================================================================
 
 #DEFINE CRLF CHR(13) + CHR(10)
@@ -165,7 +166,7 @@ DEFINE CLASS DataConnections AS Custom
 	ENDPROC
 
 	PROCEDURE FoxRemotePrg
-		RETURN This.Home() + "DataFoxRemote.prg"
+		RETURN This.Home() + "lib\foxremote\foxremote.prg"
 	ENDPROC
 
 	PROCEDURE UserFile

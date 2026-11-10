@@ -121,8 +121,8 @@ What has no equivalent, and what is done with it:
 ### Connections
 
 **FoxDock > Data > Connections** keeps the connections to your database servers (SQL Server, MySQL,
-MariaDB, PostgreSQL, Firebird and SQLite) and opens them from the IDE, through FoxRemote (a copy of it goes
-inside the package, untouched). Each connection is a bar with its own submenu:
+MariaDB, PostgreSQL, Firebird and SQLite) and opens them from the IDE, through FoxRemote (a library the package asks for
+with `requires`: it comes untouched in `lib\foxremote\`). Each connection is a bar with its own submenu:
 
 | Bar | What it does |
 |---|---|

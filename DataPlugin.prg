@@ -11,7 +11,7 @@
 *   script   Script table as > (CREATE TABLE, INSERT, UPDATE), Dialect >; tool ide_data_script
 *   connections  Connections > (una barra por conexión con Connect..., Disconnect, Explore... y
 *            Query...; Edit connections..., Reload), por
-*            FoxRemote (DataFoxRemote.prg, copia sin tocar); tools ide_data_db_connections,
+*            FoxRemote (lib\foxremote\, que el plugin pide con requires); tools ide_data_db_connections,
 *            ide_data_db_tables, ide_data_db_describe e ide_data_db_query
 *   ai       AI > (DataAi.prg): AIXL, si está instalado, sin copiar nada de él.
 *            Las cinco operaciones, el submenú del proveedor y Last run, o una
@@ -45,7 +45,7 @@ DEFINE CLASS DataPlugin AS PluginBase
 	cId = "data"
 	cTitle = "Data"
 	nOrder = 920
-	cVersion = "0.8.0"
+	cVersion = "0.9.0"
 	lWantsIdle = .T.
 	oModules = .NULL.
 	*-- .F.: OpenWithWindows no llama a ShellExecute (para las pruebas:
