@@ -93,8 +93,9 @@ DEFINE CLASS IdeDataScriptTool AS IdeDataTool
 	ToolDescription = "A table or cursor of this Visual FoxPro IDE as a script, as FoxDock > Data > Script table as makes it: " + ;
 		"kind 'create' (CREATE TABLE, with PRIMARY KEY when the CDX has a primary or candidate key on one field), 'insert' " + ;
 		"(one INSERT per row) or 'update' (one UPDATE per row by that key, or by all the fields when there is none: a comment " + ;
-		"in the script says which). Dialects: vfp, sqlserver, mysql, postgresql, sqlite; left out, the one chosen in FoxDock > " + ;
-		"Data > Dialect. General fields are left out and named in 'skipped'. With 'connection', 'table' is a table of that " + ;
+		"in the script says which). Dialects: vfp, sqlserver, mysql, postgresql, sqlite, firebird; left out, the one of the " + ;
+		"engine of 'connection' (mariadb: mysql), or without it the one chosen in FoxDock > Data > Dialect. General " + ;
+		"fields are left out and named in 'skipped'. With 'connection', 'table' is a table of that " + ;
 		"database connection of FoxDock instead (as in Explore... > Script as...): its columns and its primary key come from " + ;
 		"the server, its rows are read without opening anything in the IDE, and only for a connection with agentCanRead true; " + ;
 		"source is then connection:table. Returns table, source, kind, dialect, rowCount, returned, truncated, key and script. " + ;
@@ -103,7 +104,8 @@ DEFINE CLASS IdeDataScriptTool AS IdeDataTool
 	FUNCTION DefineParameters()
 		THIS.AddParam("table", "string", DT_TABLE_HELP, .F.)
 		THIS.AddParam("kind", "string", "create, insert or update.", .T.)
-		THIS.AddParam("dialect", "string", "vfp, sqlserver, mysql, postgresql or sqlite; left out, the one in FoxDock > Data > Dialect.", .F.)
+		THIS.AddParam("dialect", "string", "vfp, sqlserver, mysql, postgresql, sqlite or firebird; left out, the one of the engine of " + ;
+			"'connection', or without it the one in FoxDock > Data > Dialect.", .F.)
 		THIS.AddParam("maxRows", "number", "For insert and update, how many rows at most, from 1 to 1000; 1000 if left out.", .F.)
 		THIS.AddParam("connection", "string", "The id of a database connection (ide_data_db_connections lists them): 'table' is " + ;
 			"then a table of it. Left out: a table or cursor of the IDE.", .F.)

@@ -27,7 +27,7 @@ Filter und Reihenfolge des Arbeitsbereichs werden beachtet.
 | **Tabelle als JSON** (Table to JSON) | Alle Zeilen nach `<tabelle>.json` (UTF-8) in `%LOCALAPPDATA%\FoxDock\data\`, mit der Anwendung geöffnet, die Windows für `.json` hat (nie im Editor von VFP: siehe unten); die ersten 1000 Zeilen außerdem in die Zwischenablage |
 | **JSON als Cursor** (JSON to cursor) | Ein Cursor `json_1`, `json_2`... in der Datensitzung 1, mit `BROWSE NOWAIT`: aus der Zwischenablage, wenn sie JSON enthält (es beginnt mit `[` oder `{`), sonst aus einer `.json`-Datei, die Sie wählen. Aus dem Dokument von **Exportieren...** kommen seine Zeilen, und mit **Nur Schema** (Schema only) ein leerer Cursor mit seinen Spalten. JSON, das sich nicht lesen lässt, meldet der Hinweis oben rechts in VFP, ohne Dialog |
 | **Tabelle als Skript >** (Script table as) | `CREATE TABLE`, `INSERT` oder `UPDATE`, wie *Script Table as* im SQL Server Management Studio: `<tabelle>-<art>.sql`, oder `.prg` im VFP-Dialekt, im selben Ordner, in CP1252 und im Editor von VFP geöffnet |
-| **Dialekt >** (Dialect) | VFP, SQL Server, MySQL / MariaDB, PostgreSQL oder SQLite; der mit dem Häkchen ist der aktive |
+| **Dialekt >** (Dialect) | VFP, SQL Server, MySQL / MariaDB, PostgreSQL, SQLite oder Firebird; der mit dem Häkchen ist der aktive |
 
 Die Dateien werden ohne Rückfrage überschrieben (es ist der Ordner von FoxDock), und der Hinweis oben rechts in VFP und das
 Log sagen, wo sie liegen.
@@ -43,13 +43,15 @@ der Anwendung, die Windows für diese Art Datei hat, und gibt es keine, sagen de
 |---|---|---|
 | `.json` (**Tabelle als JSON**) | UTF-8, ohne BOM | der Anwendung von Windows |
 | `.sql` (**Tabelle als Skript**) | CP1252, ohne BOM | dem Editor von VFP |
-| `.sql` mit `script.utf8` | UTF-8 mit BOM | der Anwendung von Windows |
+| `.sql` mit `script.utf8` | UTF-8 mit BOM (die von Firebird ohne BOM) | der Anwendung von Windows |
 | `.prg` (VFP-Dialekt) | CP1252, ohne BOM, immer | dem Editor von VFP |
 
 Welcher Client was will: SQL Server (`sqlcmd`, SSMS) und VFP lesen CP1252. MySQL und MariaDB lesen es mit
 `mysql --default-character-set=latin1` (was MySQL latin1 nennt, ist CP1252), oder nehmen `script.utf8`.
 PostgreSQL liest es mit `PGCLIENTENCODING=WIN1252` vor `psql`, oder nimmt `script.utf8`. SQLite liest Text als
-UTF-8: dafür `script.utf8`.
+UTF-8: dafür `script.utf8`. Firebird liest es mit `isql -ch WIN1252 -i`, in einer WIN1252- und in einer UTF8-Datenbank;
+mit `script.utf8` mit `isql -ch UTF8 -i`, und seine Datei hat kein BOM, weil isql keins annimmt. Das Skript hat kein
+`COMMIT`: isql bestätigt das Eingefügte am Ende, und ein am Ende angehängtes `QUIT;` macht es rückgängig.
 
 Bei einer großen Tabelle reagiert die IDE nicht, solange geschrieben wird, und der Hinweis oben rechts in VFP zählt die
 Zeilen mit. Als Anhaltspunkt: 100.000 Zeilen mit allen Typen brauchten auf dem Rechner, auf dem gemessen
@@ -69,7 +71,8 @@ Wie jeder Wert herauskommt:
   dort ist es ein eigener Wert). Ein Memo geht als Text. Felder vom Typ General kommen nicht mit, und ein
   Kommentar und der Hinweis oben rechts in VFP sagen, welche.
 - Tabellen- und Feldnamen in den Anführungszeichen, die jede Datenbank will: `[name]` in SQL Server,
-  `` `name` `` in MySQL, `"name"` in PostgreSQL und SQLite, und ohne in VFP.
+  `` `name` `` in MySQL, `"name"` in PostgreSQL und SQLite, `"NAME"` in Firebird, und ohne in VFP. In Firebird
+  stehen sie in Großbuchstaben, damit sich die Tabelle auch ohne Anführungszeichen lesen lässt.
 - In JSON: ein Objekt pro Zeile, Feldnamen in Kleinbuchstaben, `null` für `NULL` und für ein leeres Datum,
   `true` und `false`, und Varbinary und Blob in Base64.
 - **JSON als Cursor** liest mit JSONFox 13.2.0: Was **Tabelle als JSON** geschrieben hat, kommt mit denselben
@@ -78,27 +81,29 @@ Wie jeder Wert herauskommt:
 
 ### Die Typen, Dialekt für Dialekt
 
-| VFP | SQL Server | MySQL / MariaDB | PostgreSQL | SQLite | VFP-Dialekt |
-|---|---|---|---|---|---|
-| `C(n)` Character | `NVARCHAR(n)` | `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `C(n)` |
-| `V(n)` Varchar | `NVARCHAR(n)` | `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `V(n)` |
-| `M` Memo | `NVARCHAR(MAX)` | `LONGTEXT` | `TEXT` | `TEXT` | `M` |
-| `N(w,d)` Numeric | `DECIMAL(w,d)` | `DECIMAL(w,d)` | `NUMERIC(w,d)` | `NUMERIC` | `N(w,d)` |
-| `F(w,d)` Float | `DECIMAL(w,d)` | `DECIMAL(w,d)` | `NUMERIC(w,d)` | `NUMERIC` | `F(w,d)` |
-| `I` Integer | `INT` | `INT` | `INTEGER` | `INTEGER` | `I` |
-| `B(d)` Double | `FLOAT` | `DOUBLE` | `DOUBLE PRECISION` | `REAL` | `B(d)` |
-| `Y` Currency | `MONEY` | `DECIMAL(19,4)` | `NUMERIC(19,4)` | `NUMERIC` | `Y` |
-| `D` Date | `DATE` | `DATE` | `DATE` | `TEXT` (ISO 8601) | `D` |
-| `T` DateTime | `DATETIME2(0)` | `DATETIME` | `TIMESTAMP` | `TEXT` (ISO 8601) | `T` |
-| `L` Logical | `BIT` (`1`, `0`) | `BOOLEAN` (`TRUE`, `FALSE`) | `BOOLEAN` (`TRUE`, `FALSE`) | `INTEGER` (`1`, `0`) | `L` |
-| `Q(n)` Varbinary | `VARBINARY(n)` (`0x…`) | `VARBINARY(n)` (`X'…'`) | `BYTEA` (`'\x…'`) | `BLOB` (`X'…'`) | `Q(n)` (`0h…`) |
-| `W` Blob | `VARBINARY(MAX)` | `LONGBLOB` | `BYTEA` | `BLOB` | `W` |
-| `G` General | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit |
+| VFP | SQL Server | MySQL / MariaDB | PostgreSQL | SQLite | Firebird | VFP-Dialekt |
+|---|---|---|---|---|---|---|
+| `C(n)` Character | `NVARCHAR(n)` | `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `VARCHAR(n)` | `C(n)` |
+| `V(n)` Varchar | `NVARCHAR(n)` | `VARCHAR(n)` | `VARCHAR(n)` | `TEXT` | `VARCHAR(n)` | `V(n)` |
+| `M` Memo | `NVARCHAR(MAX)` | `LONGTEXT` | `TEXT` | `TEXT` | `BLOB SUB_TYPE TEXT` | `M` |
+| `N(w,d)` Numeric | `DECIMAL(w,d)` | `DECIMAL(w,d)` | `NUMERIC(w,d)` | `NUMERIC` | `NUMERIC(w,d)` (`w` ≤ 18) | `N(w,d)` |
+| `F(w,d)` Float | `DECIMAL(w,d)` | `DECIMAL(w,d)` | `NUMERIC(w,d)` | `NUMERIC` | `NUMERIC(w,d)` (`w` ≤ 18) | `F(w,d)` |
+| `I` Integer | `INT` | `INT` | `INTEGER` | `INTEGER` | `INTEGER` | `I` |
+| `B(d)` Double | `FLOAT` | `DOUBLE` | `DOUBLE PRECISION` | `REAL` | `DOUBLE PRECISION` | `B(d)` |
+| `Y` Currency | `MONEY` | `DECIMAL(19,4)` | `NUMERIC(19,4)` | `NUMERIC` | `NUMERIC(18,4)` | `Y` |
+| `D` Date | `DATE` | `DATE` | `DATE` | `TEXT` (ISO 8601) | `DATE` | `D` |
+| `T` DateTime | `DATETIME2(0)` | `DATETIME` | `TIMESTAMP` | `TEXT` (ISO 8601) | `TIMESTAMP` | `T` |
+| `L` Logical | `BIT` (`1`, `0`) | `BOOLEAN` (`TRUE`, `FALSE`) | `BOOLEAN` (`TRUE`, `FALSE`) | `INTEGER` (`1`, `0`) | `BOOLEAN` (`TRUE`, `FALSE`) | `L` |
+| `Q(n)` Varbinary | `VARBINARY(n)` (`0x…`) | `VARBINARY(n)` (`X'…'`) | `BYTEA` (`'\x…'`) | `BLOB` (`X'…'`) | `VARCHAR(n) CHARACTER SET OCTETS` (`x'…'`) | `Q(n)` (`0h…`) |
+| `W` Blob | `VARBINARY(MAX)` | `LONGBLOB` | `BYTEA` | `BLOB` | `BLOB SUB_TYPE BINARY` (`x'…'`) | `W` |
+| `G` General | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit | kommt nicht mit |
 
 Bei einer Tabelle einer Verbindung (**Erkunden...** > **Skript als...**) ist der Typ der VFP-Buchstabe, mit dem sie vom Server
 kommt (der `type` von `ide_data_db_describe`): `bigint`, `uniqueidentifier` und `time` von SQL Server kommen als Text und
 `varbinary` als Memo, und so gehen sie. Ein `varchar(max)` oder `nvarchar(max)` kommt als `C(0)` und geht als Memo. Eine Spalte
-des Primärschlüssels ist `NOT NULL`, auch wenn die Datenbank sagt, dass sie NULL erlaubt (SQLite).
+des Primärschlüssels ist `NOT NULL`, auch wenn die Datenbank sagt, dass sie NULL erlaubt (SQLite). Aus Firebird kommen
+`BIGINT`, `INT128` und ein `NUMERIC` mit mehr als 18 Stellen als Text, `TIME` als Datum und Uhrzeit vom 30.12.1899,
+und ein binäres `BLOB` als General, das ausgelassen wird.
 
 Was keine Entsprechung hat, und was damit geschieht:
 
@@ -108,6 +113,11 @@ Was keine Entsprechung hat, und was damit geschieht:
   den seine Datumsfunktionen lesen.
 - Ein Schlüssel auf einem Feld geht als `PRIMARY KEY` in `CREATE TABLE`, und im VFP-Dialekt als
   `INDEX ON … CANDIDATE` (eine freie Tabelle hat keinen Primärschlüssel).
+- In Firebird steht nichts hinter dem Typ einer Spalte, die NULL erlaubt, und ein `N` mit mehr als 18 Stellen
+  Breite geht als `NUMERIC(18,d)`. Ein Zeilenumbruch in einem Text geht als `ASCII_CHAR(13) || ASCII_CHAR(10)`,
+  weil isql den eines Literals als LF speichert. Ein Text mit mehr als 20.000 Zeichen oder ein Binärwert mit mehr
+  als 30.000 Bytes geht in Stücken, mit `||` verbunden, und in einem Memo oder einem Blob steht das erste in einem
+  `CAST`. Eine Anweisung von Firebird darf nicht über 10.485.760 Bytes, ein größerer Wert passt also nicht.
 - Im VFP-Dialekt geht eine Zeichenkette in Stücken von 200 Zeichen, mit `+` verbunden (ein Literal darf
   nicht über 255), Steuerzeichen als `CHR(n)`, und ein Wert mit mehr als 1000 Zeichen geht leer in die
   Anweisung und wird danach stückweise angehängt (`REPLACE` nach einem `INSERT`, `UPDATE` nach einem `UPDATE`).
@@ -225,7 +235,7 @@ ein zweiter Klick holt dieses Fenster nach vorn. Darin:
     zu zeigen, und gibt es in `CONNSTRING` mit, fragt also nicht; ein nur getipptes Passwort behält FoxDock nicht, dann öffnet **Öffnen** nichts, sagt es, und der Weg
     sind die Zeilen oben.
 - **Skript als...** (Script as...): das `CREATE TABLE`, `INSERT` oder `UPDATE` der gewählten, ohne sie zu öffnen, in einem
-  kleinen Fenster: der Dialekt (anfangs der von **Dialekt >**; ihn hier zu ändern gilt nur dieses Mal), die Zeilen (alle oder die
+  kleinen Fenster: der Dialekt (anfangs der der Datenbank der Verbindung, und der von MySQL für MariaDB; ihn hier zu ändern gilt nur dieses Mal), die Zeilen (alle oder die
   ersten N, deren Zahl sich nur mit **Die ersten** eingeben lässt; nicht bei `CREATE TABLE`) und wohin es geht: **In den Editor** (To the editor) (die Datei von **Tabelle als Skript**,
   `<Tabelle>-<kind>.sql` oder `.prg` in `%LOCALAPPDATA%\FoxDock\data\`, geöffnet wie jene) oder **In die Zwischenablage** (To
   the clipboard). Die Spalten und der Primärschlüssel kommen vom Server, nicht aus den Zeilen (unten, unter der Typentabelle);
@@ -455,8 +465,8 @@ Die Optionen stehen in `"options": { "data": { ... } }`:
 |---|---|---|
 | `json.enabled` | `.T.` | `.F.` schaltet das JSON-Modul ab: kein **Tabelle als JSON**, kein **JSON als Cursor**, kein `ide_data_to_json` und kein `ide_data_from_json` |
 | `script.enabled` | `.T.` | `.F.` schaltet die Skripte ab: kein **Tabelle als Skript**, kein **Dialekt** und kein `ide_data_script` |
-| `script.dialect` | `sqlserver` | `vfp`, `sqlserver`, `mysql`, `postgresql` oder `sqlite`; **Dialekt >** schreibt es |
-| `script.utf8` | `.F.` | `.T.`: Die `.sql` wird in UTF-8 mit BOM geschrieben und mit der Anwendung von Windows geöffnet, nie im Editor von VFP; die `.prg` bleibt in CP1252. **Dialekt >** ändert es nicht |
+| `script.dialect` | `sqlserver` | `vfp`, `sqlserver`, `mysql`, `postgresql`, `sqlite` oder `firebird`; **Dialekt >** schreibt es |
+| `script.utf8` | `.F.` | `.T.`: Die `.sql` wird in UTF-8 mit BOM geschrieben (die von Firebird ohne BOM) und mit der Anwendung von Windows geöffnet, nie im Editor von VFP; die `.prg` bleibt in CP1252. **Dialekt >** ändert es nicht |
 | `connections.enabled` | `.T.` | `.F.` schaltet die Verbindungen ab: kein **Verbindungen** und keines der fünf `ide_data_db_*` |
 | `connections.createViewUpdatable` | `.T.` | `.F.`: **Aktualisierbar** ist in **Sicht erstellen...** nicht markiert, auch wenn die Tabelle einen Primärschlüssel hat. Das Fenster schreibt es, wenn Sie das Kästchen markieren oder die Markierung wegnehmen |
 | `ai.enabled` | `.T.` | `.F.` schaltet KI ab: kein **KI** und keine der sechs `ide_data_ai_*` |

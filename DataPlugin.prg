@@ -45,7 +45,7 @@ DEFINE CLASS DataPlugin AS PluginBase
 	cId = "data"
 	cTitle = "Data"
 	nOrder = 920
-	cVersion = "0.7.5"
+	cVersion = "0.8.0"
 	lWantsIdle = .T.
 	oModules = .NULL.
 	*-- .F.: OpenWithWindows no llama a ShellExecute (para las pruebas:

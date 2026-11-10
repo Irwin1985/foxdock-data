@@ -4076,9 +4076,10 @@ ENDDEFINE
 
 
 *-- Script as... de Explore...: los scripts CREATE, INSERT y UPDATE de la
-*-- tabla elegida, sin abrirla. El tipo, el dialecto (para esta vez: no cambia
-*-- options.data.script.dialect), las filas y el destino, el editor o el
-*-- portapapeles. Lo hace DataScript.RemoteScript.
+*-- tabla elegida, sin abrirla. El tipo, el dialecto (para empezar, el del
+*-- motor de la conexión; para esta vez: no cambia options.data.script.dialect),
+*-- las filas y el destino, el editor o el portapapeles. Lo hace
+*-- DataScript.RemoteScript.
 DEFINE CLASS DataScriptForm AS DataConnectionForm
 	Width = 520
 	Height = 286
@@ -4114,7 +4115,7 @@ DEFINE CLASS DataScriptForm AS DataConnectionForm
 		loS = IIF(ISNULL(loP), .NULL., loP.Module("script"))
 		IF !ISNULL(loS)
 			This.cDialects = loS.Dialects()
-			lcCur = loS.Dialect()
+			lcCur = loS.DialectOf(toC.cEngine)
 			FOR lnI = 1 TO ALINES(laD, This.cDialects, 1, ",")
 				This.cboDialect.AddItem(loS.DialectName(laD[lnI]))
 				IF laD[lnI] == lcCur

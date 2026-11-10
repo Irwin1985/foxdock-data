@@ -10,7 +10,8 @@
 *                       Con options.data.script.utf8 (false), el .sql sale en
 *                       UTF-8 con BOM (psql, mysql) y se abre con Windows, nunca en
 *                       el editor de VFP; el .prg sigue en CP1252 y en el editor
-*   Dialect >           VFP, SQL Server, MySQL / MariaDB, PostgreSQL, SQLite, con
+*   Dialect >           VFP, SQL Server, MySQL / MariaDB, PostgreSQL, SQLite,
+*                       Firebird, con
 *                       marca; en options.data.script.dialect (por defecto sqlserver)
 *   tool                ide_data_script (cualquier rol)
 *
@@ -29,12 +30,22 @@
 * de más de 1000 caracteres de expresión no va en el INSERT o el UPDATE: va
 * vacía y se añade detrás, a trozos (REPLACE tras un INSERT, UPDATE tras un
 * UPDATE).
+*
+* El dialecto Firebird: los nombres en mayúsculas entre comillas (así se
+* leen también sin ellas), nada tras el tipo en una columna que admite
+* nulos, un N de más de 18 cifras como NUMERIC(18,d), un salto de línea CRLF
+* como ASCII_CHAR(13) || ASCII_CHAR(10) (isql deja el de un literal en LF), y
+* ningún literal de más de 20.000 caracteres ni x'...' de más de 30.000 bytes:
+* lo largo va a trozos unidos con ||, y en un BLOB el primero dentro de un
+* CAST. Con utf8, su .sql va sin BOM: isql no lo acepta.
 *==================================================================
 
 #DEFINE CRLF CHR(13) + CHR(10)
-#DEFINE DS_DIALECTS "vfp,sqlserver,mysql,postgresql,sqlite"
+#DEFINE DS_DIALECTS "vfp,sqlserver,mysql,postgresql,sqlite,firebird"
 #DEFINE DS_PIECE 200
 #DEFINE DS_LONG 1000
+#DEFINE DS_FB_TEXT 20000
+#DEFINE DS_FB_BIN 30000
 
 DEFINE CLASS DataScript AS Custom
 	cId = "script"
@@ -60,7 +71,7 @@ DEFINE CLASS DataScript AS Custom
 	PROCEDURE DialectName
 		LPARAMETERS tcId
 		RETURN ICASE(tcId == "vfp", "Visual FoxPro", tcId == "sqlserver", "SQL Server", tcId == "mysql", "MySQL / MariaDB", ;
-			tcId == "postgresql", "PostgreSQL", tcId == "sqlite", "SQLite", "")
+			tcId == "postgresql", "PostgreSQL", tcId == "sqlite", "SQLite", tcId == "firebird", "Firebird", "")
 	ENDPROC
 
 	*-- Los ids de los dialectos, para la ventanita de Script as...
@@ -83,6 +94,26 @@ DEFINE CLASS DataScript AS Custom
 			lcD = "sqlserver"
 		ENDIF
 		RETURN lcD
+	ENDPROC
+
+	*-- El dialecto del motor de una conexión (mariadb escribe como mysql); un
+	*-- motor que no tiene dialecto, el de Dialect >.
+	PROCEDURE DialectOf
+		LPARAMETERS tcEngine
+		LOCAL lcE
+		lcE = LOWER(ALLTRIM(TRANSFORM(tcEngine)))
+		lcE = IIF(lcE == "mariadb", "mysql", lcE)
+		RETURN IIF(This.IsDialect(lcE) AND !(lcE == "vfp"), lcE, This.Dialect())
+	ENDPROC
+
+	*-- El dialecto de la conexión tcConn, por su motor.
+	PROCEDURE ConnDialect
+		LPARAMETERS tcConn
+		LOCAL loP, loM, loC
+		loP = This.Plugin()
+		loM = IIF(ISNULL(loP), .NULL., loP.Module("connections"))
+		loC = IIF(ISNULL(loM), .NULL., loM.Find(tcConn))
+		RETURN This.DialectOf(IIF(ISNULL(loC), "", loC.cEngine))
 	ENDPROC
 
 	*-- El paquete, por el host: el módulo no guarda una referencia a él (el
@@ -115,10 +146,11 @@ DEFINE CLASS DataScript AS Custom
 		RETURN tnBar
 	ENDPROC
 
-	PROTECTED PROCEDURE Hotkey
+	*-- El texto de la barra de un dialecto, con su tecla.
+	PROCEDURE Hotkey
 		LPARAMETERS tcId
 		RETURN ICASE(tcId == "vfp", "\<VFP", tcId == "sqlserver", "SQL \<Server", tcId == "mysql", "\<MySQL / MariaDB", ;
-			tcId == "postgresql", "\<PostgreSQL", "SQL\<ite")
+			tcId == "postgresql", "\<PostgreSQL", tcId == "firebird", "\<Firebird", "SQL\<ite")
 	ENDPROC
 
 	PROCEDURE GetAgentTools
@@ -191,8 +223,8 @@ DEFINE CLASS DataScript AS Custom
 		RETURN llOk
 	ENDPROC
 
-	*-- El .sql en UTF-8 con BOM: solo con options.data.script.utf8 y nunca el
-	*-- .prg del dialecto VFP.
+	*-- El .sql en UTF-8 (con BOM, salvo el de Firebird): solo con
+	*-- options.data.script.utf8 y nunca el .prg del dialecto VFP.
 	PROCEDURE Utf8File
 		LPARAMETERS tcDialect
 		LOCAL luV
@@ -220,7 +252,7 @@ DEFINE CLASS DataScript AS Custom
 		LOCAL loF, loR, lcC, lnTotal, lnN, llTrunc, lcList, llVfp, llShow, llAllKey, lcCreate
 		LOCAL ARRAY laRow[1]
 		llVfp = tcDialect == "vfp"
-		loF = CREATEOBJECT("DataFile", tcFile, IIF(This.Utf8File(tcDialect), "utf8bom", "ansi"))
+		loF = CREATEOBJECT("DataFile", tcFile, IIF(This.Utf8File(tcDialect), IIF(tcDialect == "firebird", "utf8", "utf8bom"), "ansi"))
 		lcC = IIF(llVfp, "* ", "-- ")
 		IF !tlKeySet
 			This.FindKey(toT)
@@ -608,7 +640,7 @@ DEFINE CLASS DataScript AS Custom
 	PROCEDURE Q
 		LPARAMETERS tcName, tcDialect
 		RETURN ICASE(tcDialect == "sqlserver", "[" + tcName + "]", tcDialect == "mysql", "`" + tcName + "`", ;
-			tcDialect == "vfp", tcName, ["] + tcName + ["])
+			tcDialect == "vfp", tcName, tcDialect == "firebird", ["] + UPPER(tcName) + ["], ["] + tcName + ["])
 	ENDPROC
 
 	*-- El tipo de una columna en un dialecto: la tabla del manual.
@@ -649,6 +681,12 @@ DEFINE CLASS DataScript AS Custom
 				RETURN ICASE(INLIST(lcT, "C", "V"), "VARCHAR(" + TRANSFORM(lnW) + ")", lcT == "M", "TEXT", ;
 					INLIST(lcT, "N", "F"), "NUMERIC" + lcWD, lcT == "I", "INTEGER", lcT == "B", "DOUBLE PRECISION", ;
 					lcT == "Y", "NUMERIC(19,4)", lcT == "D", "DATE", lcT == "T", "TIMESTAMP", lcT == "L", "BOOLEAN", "BYTEA")
+			CASE tcDialect == "firebird"
+				RETURN ICASE(INLIST(lcT, "C", "V"), "VARCHAR(" + TRANSFORM(lnW) + ")", lcT == "M", "BLOB SUB_TYPE TEXT", ;
+					INLIST(lcT, "N", "F"), "NUMERIC" + IIF(EMPTY(lcNum) AND lnW > 18, "(18," + TRANSFORM(lnD) + ")", lcWD), ;
+					lcT == "I", "INTEGER", lcT == "B", "DOUBLE PRECISION", lcT == "Y", "NUMERIC(18,4)", lcT == "D", "DATE", ;
+					lcT == "T", "TIMESTAMP", lcT == "L", "BOOLEAN", lcT == "Q", "VARCHAR(" + TRANSFORM(lnW) + ") CHARACTER SET OCTETS", ;
+					"BLOB SUB_TYPE BINARY")
 		ENDCASE
 		RETURN ICASE(INLIST(lcT, "C", "V", "M", "D", "T"), "TEXT", INLIST(lcT, "N", "F", "Y"), "NUMERIC", ;
 			INLIST(lcT, "I", "L"), "INTEGER", lcT == "B", "REAL", "BLOB")
@@ -660,7 +698,7 @@ DEFINE CLASS DataScript AS Custom
 		lcOut = "CREATE TABLE " + This.Q(toT.cName, tcDialect) + " (" + CRLF
 		FOR lnI = 1 TO toT.nCols
 			lcOut = lcOut + "    " + This.Q(toT.aCols[lnI, 1], tcDialect) + " " + This.TypeOf(toT, lnI, tcDialect) + ;
-				IIF(toT.aCols[lnI, 5], " NULL", " NOT NULL") + IIF(lnI < toT.nCols OR This.KeyCount() > 0, ",", "") + CRLF
+				IIF(toT.aCols[lnI, 5], IIF(tcDialect == "firebird", "", " NULL"), " NOT NULL") + IIF(lnI < toT.nCols OR This.KeyCount() > 0, ",", "") + CRLF
 		ENDFOR
 		IF This.KeyCount() > 0
 			lcOut = lcOut + "    PRIMARY KEY (" + This.KeyList(toT, tcDialect) + ")" + CRLF
@@ -797,6 +835,9 @@ DEFINE CLASS DataScript AS Custom
 				IF llVfp
 					RETURN This.VfpString(lcS)
 				ENDIF
+				IF tcDialect == "firebird"
+					RETURN This.FbString(lcS, lcT == "M")
+				ENDIF
 				lcS = STRTRAN(lcS, "'", "''")
 				IF tcDialect == "mysql"
 					lcS = STRTRAN(lcS, "\", "\\")
@@ -814,14 +855,84 @@ DEFINE CLASS DataScript AS Custom
 				RETURN ICASE(EMPTY(lcS), IIF(llVfp, "{/:}", "NULL"), llVfp, "{^" + STRTRAN(lcS, "T", " ") + "}", ;
 					tcDialect == "sqlserver", "'" + lcS + "'", "'" + STRTRAN(lcS, "T", " ") + "'")
 			CASE lcT == "L"
-				RETURN ICASE(llVfp, IIF(tvValue, ".T.", ".F."), INLIST(tcDialect, "mysql", "postgresql"), ;
+				RETURN ICASE(llVfp, IIF(tvValue, ".T.", ".F."), INLIST(tcDialect, "mysql", "postgresql", "firebird"), ;
 					IIF(tvValue, "TRUE", "FALSE"), IIF(tvValue, "1", "0"))
 			CASE INLIST(lcT, "Q", "W")
 				lcS = STRCONV(tvValue, 15)
+				IF tcDialect == "firebird"
+					RETURN This.FbBinary(lcS, lcT == "W")
+				ENDIF
 				RETURN ICASE(llVfp, "0h" + lcS, tcDialect == "sqlserver", "0x" + lcS, tcDialect == "postgresql", ;
 					"'\x" + lcS + "'", "X'" + lcS + "'")
 		ENDCASE
 		RETURN IIF(llVfp, ".NULL.", "NULL")
+	ENDPROC
+
+	*-- Un texto en Firebird: cada CRLF como ASCII_CHAR(13) || ASCII_CHAR(10), y
+	*-- el resto en literales de DS_FB_TEXT caracteres como mucho, unidos con ||.
+	*-- En una columna BLOB (tlBlob) con más de un trozo, el primero va en un CAST:
+	*-- el || de dos literales es un VARCHAR, y no pasa de 32.765 bytes.
+	PROCEDURE FbString
+		LPARAMETERS tcS, tlBlob
+		LOCAL loP, lcRest, lcSeg, lnAt, lcOut, lcFirst, llLit
+		loP = CREATEOBJECT("Collection")
+		lcRest = tcS
+		DO WHILE .T.
+			lnAt = AT(CHR(13) + CHR(10), lcRest)
+			lcSeg = IIF(lnAt = 0, lcRest, LEFT(lcRest, lnAt - 1))
+			DO WHILE LEN(lcSeg) > 0
+				loP.Add("'" + STRTRAN(LEFT(lcSeg, DS_FB_TEXT), "'", "''") + "'")
+				lcSeg = SUBSTR(lcSeg, DS_FB_TEXT + 1)
+			ENDDO
+			IF lnAt = 0
+				EXIT
+			ENDIF
+			loP.Add("ASCII_CHAR(13) || ASCII_CHAR(10)")
+			lcRest = SUBSTR(lcRest, lnAt + 2)
+		ENDDO
+		IF loP.Count = 0
+			RETURN "''"
+		ENDIF
+		lcFirst = loP.Item(1)
+		llLit = LEFT(lcFirst, 1) == "'"
+		IF loP.Count = 1 AND llLit
+			RETURN lcFirst
+		ENDIF
+		lcOut = ""
+		FOR EACH lcSeg IN loP
+			lcOut = lcOut + IIF(EMPTY(lcOut), "", " || ") + lcSeg
+		ENDFOR
+		DO CASE
+			CASE !tlBlob
+				RETURN lcOut
+			CASE llLit
+				RETURN "CAST(" + lcFirst + " AS BLOB SUB_TYPE TEXT)" + SUBSTR(lcOut, LEN(lcFirst) + 1)
+		ENDCASE
+		RETURN "CAST('' AS BLOB SUB_TYPE TEXT) || " + lcOut
+	ENDPROC
+
+	*-- Un binario en Firebird (tcHex, sus cifras): x'...' de DS_FB_BIN bytes como
+	*-- mucho, unidos con ||; en una columna BLOB (tlBlob), el primero en un CAST.
+	PROCEDURE FbBinary
+		LPARAMETERS tcHex, tlBlob
+		LOCAL lcOut, lnN, lnI, lcPiece
+		lnN = MAX(CEILING(LEN(tcHex) / (2 * DS_FB_BIN)), 1)
+		IF lnN = 1
+			RETURN "x'" + tcHex + "'"
+		ENDIF
+		lcOut = ""
+		FOR lnI = 1 TO lnN
+			lcPiece = "x'" + SUBSTR(tcHex, (lnI - 1) * 2 * DS_FB_BIN + 1, 2 * DS_FB_BIN) + "'"
+			DO CASE
+				CASE lnI > 1
+					lcOut = lcOut + " || " + lcPiece
+				CASE tlBlob
+					lcOut = "CAST(" + lcPiece + " AS BLOB SUB_TYPE BINARY)"
+				OTHERWISE
+					lcOut = lcPiece
+			ENDCASE
+		ENDFOR
+		RETURN lcOut
 	ENDPROC
 
 	*-- Una cadena como expresión de VFP: trozos de DS_PIECE caracteres entre
@@ -914,10 +1025,11 @@ DEFINE CLASS DataScript AS Custom
 				This.cLastError = "'kind' is '" + tcKind + "': it has to be create, insert or update."
 				RETURN ""
 			CASE EMPTY(tcDialect)
-				tcDialect = This.Dialect()
+				*-- Con una conexión, el de su motor.
+				tcDialect = IIF(EMPTY(tcConn), This.Dialect(), This.ConnDialect(tcConn))
 			CASE !This.IsDialect(tcDialect)
 				This.cLastError = "'dialect' is '" + tcDialect + "': it has to be one of " + DS_DIALECTS + ;
-					" (or left out for the one in FoxDock > Data > Dialect)."
+					" (or left out: with 'connection', the one of its engine; without it, the one in FoxDock > Data > Dialect)."
 				RETURN ""
 		ENDCASE
 		IF !EMPTY(tcConn)
