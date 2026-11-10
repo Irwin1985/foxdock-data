@@ -339,7 +339,7 @@ DEFINE CLASS IdeDataDbDescribeTool AS IdeDataDbTool
 	ENDFUNC
 
 	FUNCTION Run(toContext)
-		LOCAL loM, lcId, lcCur, lcName, loJ, loD, loA, loO, lnDs, lcKey
+		LOCAL loM, lcId, lcCur, lcName, loJ, loD, loA, loO, lnDs, lcKey, lcEngine, lcList, lcType, loC
 		loM = THIS.Conn(toContext)
 		IF ISNULL(loM)
 			RETURN THIS.oRefusal
@@ -350,6 +350,10 @@ DEFINE CLASS IdeDataDbDescribeTool AS IdeDataDbTool
 		IF EMPTY(lcName)
 			RETURN THIS.Refused(loM)
 		ENDIF
+		*-- El tipo con el que la columna llega por Explore, no el del driver (Arrives).
+		loC = loM.Find(lcId)
+		lcEngine = IIF(ISNULL(loC), "", loC.cEngine)
+		lcList = loM.CastListOf(lcId, lcName)
 		loJ = THIS.J()
 		loD = loJ.MakeObject()
 		loA = loJ.MakeArray()
@@ -358,10 +362,11 @@ DEFINE CLASS IdeDataDbDescribeTool AS IdeDataDbTool
 		SET DATASESSION TO 1
 		SELECT (lcCur)
 		SCAN
+			lcType = loM.Arrives(lcEngine, ALLTRIM(type), width, LOWER(ALLTRIM(name)), lcList)
 			loO = loJ.MakeObject()
 			loJ.Put(loO, "name", ALLTRIM(name))
-			loJ.Put(loO, "type", ALLTRIM(type))
-			loJ.Put(loO, "width", width)
+			loJ.Put(loO, "type", GETWORDNUM(lcType, 1, ":"))
+			loJ.Put(loO, "width", INT(VAL(GETWORDNUM(lcType, 2, ":"))))
 			loJ.Put(loO, "decimals", decimals)
 			loJ.Put(loO, "nullable", nullable)
 			loJ.Put(loO, "primaryKey", primary_key)
@@ -434,7 +439,12 @@ DEFINE CLASS IdeDataDbQueryTool AS IdeDataDbTool
 		"UPDATE, DELETE, DROP, INTO, ...): anything else is refused before it reaches the server. On SQL Server, a table " + ;
 		"of another database of the same server is read with its three-part name (database.schema.table). Writing goes through " + ;
 		"ide_data_db_execute. Only for a connection with agentCanRead true. Returns connection, returned, truncated (there " + ;
-		"were more rows than maxRows) and rows."
+		"were more rows than maxRows) and rows. A varchar(max), nvarchar(max) or varbinary(max) of SQL Server, or a LONGTEXT " + ;
+		"or JSON of MySQL or MariaDB (they arrive cut at 255 or 252 characters), is always read again whole (on MySQL a " + ;
+		"VARCHAR(252) too, and it arrives as a memo); when it cannot be (the statement has ORDER " + ;
+		"BY, or it cannot be wrapped), incompleteColumns lists those columns, each with name, reason (order_by or " + ;
+		"wrap_failed) and readWith, the CAST to write in the SELECT to get it whole. On Firebird, a CHAR or VARCHAR " + ;
+		"CHARACTER SET OCTETS arrives as text: ask for it with CAST(x AS BLOB SUB_TYPE BINARY)."
 
 	FUNCTION DefineParameters()
 		THIS.AddParam("connection", "string", "The id of the connection.", .T.)
@@ -443,7 +453,7 @@ DEFINE CLASS IdeDataDbQueryTool AS IdeDataDbTool
 	ENDFUNC
 
 	FUNCTION Run(toContext)
-		LOCAL loM, lcId, lcCur, lnMax, lcRows, loJ, loD, lcMeta, lnDs
+		LOCAL loM, lcId, lcCur, lnMax, lcRows, lnDs
 		loM = THIS.Conn(toContext)
 		IF ISNULL(loM)
 			RETURN THIS.oRefusal
@@ -451,7 +461,7 @@ DEFINE CLASS IdeDataDbQueryTool AS IdeDataDbTool
 		lcId = THIS.PText(toContext, "connection")
 		lnMax = THIS.MaxRows(toContext)
 		lcCur = "FDQ" + SYS(2015)
-		IF !loM.Query(lcId, THIS.PText(toContext, "sql"), lnMax, lcCur)
+		IF !loM.QueryWhole(lcId, THIS.PText(toContext, "sql"), lnMax, lcCur)
 			RETURN THIS.Refused(loM)
 		ENDIF
 		lcRows = loM.RowsJson(lcCur, lnMax)
@@ -461,15 +471,35 @@ DEFINE CLASS IdeDataDbQueryTool AS IdeDataDbTool
 			USE IN (lcCur)
 		ENDIF
 		SET DATASESSION TO (lnDs)
-		loJ = THIS.J()
-		loD = loJ.MakeObject()
-		loJ.Put(loD, "connection", LOWER(lcId))
-		loJ.Put(loD, "returned", loM.nLastRows)
-		loJ.Put(loD, "truncated", loM.lLastTruncated)
-		lcMeta = loJ.Stringify(loD)
 		_screen.oFoxDock.AgentDid("read " + TRANSFORM(loM.nLastRows) + " row(s) from connection '" + LOWER(lcId) + "'" + ;
 			IIF(loM.lLastTruncated, " (there were more)", ""))
-		RETURN THIS.Ok(LEFT(lcMeta, LEN(lcMeta) - 1) + [,"rows":] + lcRows + "}")
+		RETURN THIS.Ok(THIS.Answer(loM, lcId, lcRows))
+	ENDFUNC
+
+	*-- El JSON de la respuesta, con las filas ya hechas (tcRows). incompleteColumns
+	*-- solo si alguna columna no llegó entera (cLastShort del módulo).
+	FUNCTION Answer(toM, tcId, tcRows)
+		LOCAL loJ, loD, loA, loO, lcMeta, lnI, lcC, lcName
+		loJ = THIS.J()
+		loD = loJ.MakeObject()
+		loJ.Put(loD, "connection", LOWER(tcId))
+		loJ.Put(loD, "returned", toM.nLastRows)
+		loJ.Put(loD, "truncated", toM.lLastTruncated)
+		IF !EMPTY(toM.cLastShort)
+			loA = loJ.MakeArray()
+			FOR lnI = 1 TO GETWORDCOUNT(toM.cLastShort, ",")
+				lcC = GETWORDNUM(toM.cLastShort, lnI, ",")
+				lcName = GETWORDNUM(lcC, 1, ":")
+				loO = loJ.MakeObject()
+				loJ.Put(loO, "name", lcName)
+				loJ.Put(loO, "reason", toM.cLastShortWhy)
+				loJ.Put(loO, "readWith", toM.CastExpr(toM.cLastShortEngine, lcName, SUBSTR(lcC, AT(":", lcC) + 1)))
+				loA.Add(loO)
+			ENDFOR
+			loJ.Put(loD, "incompleteColumns", loA)
+		ENDIF
+		lcMeta = loJ.Stringify(loD)
+		RETURN LEFT(lcMeta, LEN(lcMeta) - 1) + [,"rows":] + tcRows + "}"
 	ENDFUNC
 ENDDEFINE
 *------------------------------------------------------------------

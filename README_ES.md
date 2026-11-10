@@ -101,16 +101,28 @@ De una tabla de una conexión (**Explorar...** > **Script como...**), el tipo es
 binario llega como binario, como en todo lo que FoxDock lee de una conexión (**Consulta...**, **Explorar...**, las tools del
 agente y **Queries**): `binary`, `varbinary` y `rowversion` como `Q`, e `image`, `varbinary(max)`, un `BLOB` o un `bytea` como
 `W`, con sus bytes. Un `varchar(max)` o `nvarchar(max)` llega como `C(0)` y va como memo; un `varbinary(max)` se vuelve a leer
-para que llegue como `W`, y va como `VARBINARY(MAX)`. Una columna de la clave primaria va `NOT NULL`, aunque el motor diga que
+para que llegue como `W`, y va como `VARBINARY(MAX)`.
+`ide_data_db_describe` da el tipo con el que lo lee **Explorar...**: `M` para esos dos y para un `LONGTEXT` o un
+`JSON`, y `W` para un `varbinary(max)` y para los `OCTETS` de Firebird. Una columna de la clave primaria va `NOT NULL`, aunque el motor diga que
 admite nulos (SQLite). De Firebird, `BIGINT`, `INT128` y un `NUMERIC` de más de 18 cifras llegan como texto, `TIME` llega como
 fecha y hora del 30-12-1899, y un `BLOB` binario llega como `W`. **Explorar...** y **Script como...** leen un `CHAR` o
 `VARCHAR … CHARACTER SET OCTETS` como binario, y va como `CHAR(n)` o `VARCHAR(n) CHARACTER SET OCTETS`; con **Consulta...**
 sigue llegando como texto. En MySQL y MariaDB un `LONGTEXT` o un `JSON` se vuelve a leer con `CAST(x AS CHAR(16777215))`, así
-que llega entero, como memo; con **Consulta...** y un SQL escrito a mano llega cortado a 255 caracteres, como un
-`varchar(max)` de SQL Server. Una tabla de Firebird o de PostgreSQL scriptada en el dialecto de su motor lleva los nombres
+que llega entero, como memo; con **Consulta...** y un SQL escrito a mano, lo cuenta el párrafo
+siguiente. Una tabla de Firebird o de PostgreSQL scriptada en el dialecto de su motor lleva los nombres
 de su catálogo, así que una tabla en minúsculas de Firebird o en mayúsculas de PostgreSQL se vuelve a crear con su nombre. Una columna que aún llega como General está en el `CREATE TABLE` con su tipo, y el comentario de
 arriba dice que su contenido no se scripta. En el JSON de `ide_data_db_query` y de `ide_queries_run`, Varbinary y Blob van en
 base64.
+
+**Un SQL escrito a mano** (**Consulta...** e `ide_data_db_query`): un `varchar(max)`, `nvarchar(max)` o `varbinary(max)`
+de SQL Server llega vacío en la primera lectura, y un `LONGTEXT` o un `JSON` de MySQL o MariaDB llega cortado a 255 (o
+252) caracteres. Entonces FoxDock vuelve a leer la consulta por su cuenta, como `SELECT <columnas> FROM (<tu SQL>) AS q`
+con el `CAST` de cada una: `IMAGE` y `TEXT` en SQL Server, `CHAR(16777215)` en MySQL y MariaDB; las filas y el tope de
+filas son los mismos. No la vuelve a leer si tu SQL lleva `ORDER BY` (una tabla derivada no guarda el orden), y si el
+servidor no acepta la consulta envuelta (una columna sin nombre, dos con el mismo nombre, un `WITH`) se queda la primera
+lectura. Entonces el aviso de **Consulta...** e `incompleteColumns` en el JSON de `ide_data_db_query` nombran esas
+columnas, cada una con el `CAST` que hay que escribir en tu `SELECT`. En MySQL y MariaDB un `LONGTEXT` o un `JSON` se vuelve a leer siempre (FoxDock lo conoce por su tipo, no por lo que trae), y con `ORDER BY` se nombra siempre, aunque sus valores sean cortos; en MySQL un `VARCHAR(252)` llega igual y también se vuelve a leer, como memo. En Firebird no se vuelve a leer nada: un `CHAR` o `VARCHAR … CHARACTER SET OCTETS` llega como texto; pídelo con
+`CAST(x AS BLOB SUB_TYPE BINARY)`.
 
 Lo que no tiene equivalente, y qué se hace con ello:
 
@@ -207,7 +219,12 @@ otra vez trae esa ventana delante. En ella:
     Con clave viene marcada de entrada; sin clave, apagada. Si la desmarcas, la siguiente ventana se abre desmarcada: se
     guarda en `config.json`, en la opción `connections.createViewUpdatable` (abajo). En
     SQLite, las columnas `TEXT` quedan fuera (en VFP son memo, y una vista no las escribe), y el texto llega en el
-    UTF-8 que guarda SQLite: `STRCONV(<campo>, 11)` devuelve los acentos;
+    UTF-8 que guarda SQLite: `STRCONV(<campo>, 11)` devuelve los acentos. Una columna que **Explorar...** vuelve a leer con un
+    `CAST` va en la vista con el mismo, y llega entera: en SQL Server, un `varbinary(max)` como `IMAGE` (un Blob) y un
+    `varchar(max)` o `nvarchar(max)` como `TEXT` (un memo); en MySQL y MariaDB, un `LONGTEXT` o un `JSON` como
+    `CHAR(16777215)` (un memo). Un `JSON` de MySQL queda fuera de las columnas actualizables (VFP no lo puede guardar),
+    y los `OCTETS` de Firebird van sin `CAST`, como `C(n)` o `V(n)`: con él, guardarlos no escribiría nada. Ese `CHAR(n)` es un `C(n)` en VFP: un valor más corto se
+    guarda rellenado con espacios, como en cualquier campo `C`;
   - **ninguna contraseña en el `.dbc`**: su conexión lleva la cadena sin la contraseña, también mientras se hace la
     vista. Mientras FoxDock la crea, la contraseña va en un fichero `.dsn` temporal en la carpeta temporal de tu
     usuario (`%TEMP%\foxdock-*.dsn`), que FoxDock borra al acabar, también si la vista falla. Y la conexión no

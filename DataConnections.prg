@@ -107,6 +107,9 @@ DEFINE CLASS DataConnections AS Custom
 	lNeedsConnectBar = .F. && el último fallo fue que falta la contraseña
 	nLastRows = 0
 	lLastTruncated = .F.
+	cLastShort = ""       && QueryWhole: «,columna:CAST,» de lo que no llegó entero (vacío si todo llegó)
+	cLastShortWhy = ""    && por qué no se releyó: order_by o wrap_failed
+	cLastShortEngine = "" && el motor de esa consulta, para escribir el CAST con sus comillas
 	cLastQueryAlias = ""
 	cLastTitle = ""       && el título del último BROWSE (lo leen los tests)
 	cLastCursor = ""      && el cursor del último RunQuery que salió bien (Query... lo apunta)
@@ -963,6 +966,109 @@ DEFINE CLASS DataConnections AS Custom
 		RETURN IIF(EMPTY(lcOut), "", lcOut + ",")
 	ENDPROC
 
+	*-- Una columna en el SELECT de una vista de Explore: con el mismo CAST con el
+	*-- que la relee TableSelect (ReadCast), o con su nombre entre las comillas del
+	*-- motor. tcTypes, de ColumnTypes; tcList, de CastList. Sin el CAST, un
+	*-- varbinary(max), un (n)varchar(max) o un LONGTEXT dan el error 1544 en
+	*-- CREATE SQL VIEW. Un OCTETS de Firebird va sin CAST, como C(n) o V(n): con
+	*-- CAST(x AS BLOB SUB_TYPE BINARY) llega como W, pero al guardarlo TABLEUPDATE
+	*-- da .T. y el servidor se queda con lo que tenía.
+	PROCEDURE ViewColumn
+		LPARAMETERS tcEngine, tcCol, tcTypes, tcList
+		LOCAL lcT
+		IF tcEngine == "firebird"
+			RETURN This.Quoted(tcEngine, tcCol)
+		ENDIF
+		lcT = STREXTRACT(tcTypes, "," + LOWER(tcCol) + ":", ",")
+		RETURN This.CastExpr(tcEngine, tcCol, This.ReadCast(tcEngine, GETWORDNUM(lcT, 1, ":"), VAL(GETWORDNUM(lcT, 2, ":")), ;
+			LOWER(tcCol), EVL(tcList, "")))
+	ENDPROC
+
+	*-- La columna tcCol en un SELECT, leída con el CAST tcCast de ReadCast y con su
+	*-- nombre de siempre; sin CAST, su nombre entre las comillas del motor. Un TEXT
+	*-- pasa antes por VARCHAR(MAX), que lo admite desde un nvarchar(max).
+	PROCEDURE CastExpr
+		LPARAMETERS tcEngine, tcCol, tcCast
+		LOCAL lcQ
+		lcQ = This.Quoted(tcEngine, tcCol)
+		DO CASE
+			CASE EMPTY(tcCast)
+				RETURN lcQ
+			CASE tcCast == "TEXT"
+				RETURN "CAST(CAST(" + lcQ + " AS VARCHAR(MAX)) AS TEXT) AS " + lcQ
+		ENDCASE
+		RETURN "CAST(" + lcQ + " AS " + tcCast + ") AS " + lcQ
+	ENDPROC
+
+	*-- La lista del catálogo que necesita ReadCast para la tabla tcTable: las
+	*-- columnas OCTETS en Firebird (FbOctets), los textos largos en MySQL y MariaDB
+	*-- (MyLongText); en los demás motores, vacía.
+	PROCEDURE CastList
+		LPARAMETERS tcEngine, tnHandle, tcTable
+		DO CASE
+			CASE tcEngine == "firebird"
+				RETURN This.FbOctets(tnHandle, tcTable)
+			CASE INLIST(tcEngine, "mysql", "mariadb")
+				RETURN This.MyLongText(tnHandle, tcTable)
+		ENDCASE
+		RETURN ""
+	ENDPROC
+
+	*-- CastList de la tabla tcTable de la conexión tcId, si está conectada; vacía si
+	*-- no lo está (entonces cada columna va con el tipo del driver).
+	PROCEDURE CastListOf
+		LPARAMETERS tcId, tcTable
+		LOCAL loC, loDb
+		loC = This.Find(tcId)
+		loDb = This.Live(tcId)
+		IF ISNULL(loC) OR ISNULL(loDb)
+			RETURN ""
+		ENDIF
+		RETURN This.CastList(loC.cEngine, loDb.nHandle, tcTable)
+	ENDPROC
+
+	*-- El tipo con el que llega una columna por Explore, «letra:ancho»: W si
+	*-- ReadCast la relee como binario, M si la relee como texto largo (las dos con
+	*-- el ancho 4 de un Blob o un Memo); si no, el que da el driver.
+	PROCEDURE Arrives
+		LPARAMETERS tcEngine, tcType, tnWidth, tcName, tcList
+		LOCAL lcCast
+		lcCast = This.ReadCast(tcEngine, tcType, tnWidth, tcName, tcList)
+		DO CASE
+			CASE INLIST(lcCast, "IMAGE", "BLOB SUB_TYPE BINARY")
+				RETURN "W:4"
+			CASE INLIST(lcCast, "TEXT", "CHAR(16777215)")
+				RETURN "M:4"
+		ENDCASE
+		RETURN tcType + ":" + TRANSFORM(tnWidth)
+	ENDPROC
+
+	*-- Las columnas de tcTable con su letra y su ancho, como las da GetColumns con
+	*-- MapBinary: «,nombre:letra:ancho,», en minúsculas; vacío si no se pudo.
+	PROCEDURE ColumnTypes
+		LPARAMETERS toDb, tcTable
+		LOCAL lcOut, lcCur, lnDs, loErr
+		lcOut = ""
+		lcCur = "FDT" + SYS(2015)
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		TRY
+			IF This.BinaryRead(toDb, "columns", tcTable, lcCur) AND USED(lcCur)
+				SELECT (lcCur)
+				SCAN
+					lcOut = lcOut + "," + LOWER(ALLTRIM(name)) + ":" + ALLTRIM(type) + ":" + TRANSFORM(width)
+				ENDSCAN
+			ENDIF
+		CATCH TO loErr
+			lcOut = ""
+		ENDTRY
+		IF USED(lcCur)
+			USE IN (lcCur)
+		ENDIF
+		SET DATASESSION TO (lnDs)
+		RETURN IIF(EMPTY(lcOut), "", lcOut + ",")
+	ENDPROC
+
 	*-- Con qué tipo vuelve a leer TableSelect una columna, o "" si no hace falta.
 	*-- tcList, según el motor: las columnas OCTETS de Firebird (FbOctets) o los
 	*-- textos largos de MySQL y MariaDB (MyLongText). En SQL Server, un
@@ -986,9 +1092,10 @@ DEFINE CLASS DataConnections AS Custom
 	*-- Las columnas LONGTEXT y JSON de la tabla tcTable de MySQL o MariaDB, del
 	*-- catálogo: el driver da su tamaño como -1 y VFP las corta en un C(255) (o
 	*-- C(252)); con CAST(x AS CHAR(16777215)) llegan como memo, enteras.
-	*-- «,nombre,», en minúsculas; vacío si no hay o no se pudo leer.
+	*-- «,nombre,», en minúsculas; vacío si no hay o no se pudo leer. tcTypes, otros
+	*-- DATA_TYPE del catálogo («'json'»); sin él, los dos.
 	PROCEDURE MyLongText
-		LPARAMETERS tnHandle, tcTable
+		LPARAMETERS tnHandle, tcTable, tcTypes
 		LOCAL lnDs, lcOut, lcCur, loErr
 		lcOut = ""
 		lcCur = "FDL" + SYS(2015)
@@ -996,7 +1103,7 @@ DEFINE CLASS DataConnections AS Custom
 		SET DATASESSION TO 1
 		TRY
 			IF SQLEXEC(tnHandle, "SELECT COLUMN_NAME AS cname FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() " + ;
-					"AND TABLE_NAME = '" + STRTRAN(tcTable, "'", "''") + "' AND DATA_TYPE IN ('longtext', 'json')", lcCur) > 0 AND USED(lcCur)
+					"AND TABLE_NAME = '" + STRTRAN(tcTable, "'", "''") + "' AND DATA_TYPE IN (" + EVL(tcTypes, "'longtext', 'json'") + ")", lcCur) > 0 AND USED(lcCur)
 				SELECT (lcCur)
 				SCAN
 					lcOut = lcOut + "," + LOWER(ALLTRIM(TRANSFORM(cname)))
@@ -1084,6 +1191,181 @@ DEFINE CLASS DataConnections AS Custom
 			This.cLastError = "The query on '" + tcId + "' failed: " + IIF(EMPTY(lcErr), loDb.cLastError, lcErr)
 		ENDIF
 		RETURN llOk
+	ENDPROC
+
+	*-- Query para un SQL escrito a mano (Query... de la ventana e ide_data_db_query):
+	*-- si una columna no llega entera, la vuelve a leer envuelta, SELECT <columnas,
+	*-- con su CAST> FROM (<sentencia>) AS q, con el mismo alias y el mismo tope.
+	*-- Con ORDER BY no se relee (una tabla derivada no guarda el orden), y si la
+	*-- envoltura falla queda la primera lectura: en los dos casos, cLastShort dice
+	*-- qué columnas no llegaron enteras y cLastShortWhy, por qué. TableSelect va
+	*-- por Query, que relee por su cuenta con el catálogo.
+	PROCEDURE QueryWhole
+		LPARAMETERS tcId, tcSql, tnMax, tcAlias
+		LOCAL loC, lcEngine, lcShort, lcCols, lcWrap, lnDs, laF[1], lnN, lnI, lcName, lcTmp, llOk, lnRows, llTrunc, loErr, lcErr
+		This.cLastShort = ""
+		This.cLastShortWhy = ""
+		This.cLastShortEngine = ""
+		IF !This.Query(tcId, tcSql, tnMax, tcAlias)
+			RETURN .F.
+		ENDIF
+		loC = This.Find(tcId)
+		lcEngine = IIF(ISNULL(loC), "", loC.cEngine)
+		IF !INLIST(lcEngine, "sqlserver", "mysql", "mariadb")
+			RETURN .T.
+		ENDIF
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		lcShort = This.ShortColumns(lcEngine, tcAlias)
+		lcCols = ""
+		IF !EMPTY(lcShort)
+			lnN = AFIELDS(laF, tcAlias)
+			FOR lnI = 1 TO lnN
+				lcName = LOWER(laF[lnI, 1])
+				lcCols = lcCols + IIF(lnI = 1, "", ",") + lcName + ":" + STREXTRACT(lcShort, "," + lcName + ":", ",")
+			ENDFOR
+		ENDIF
+		SET DATASESSION TO (lnDs)
+		IF EMPTY(lcShort)
+			RETURN .T.
+		ENDIF
+		lcWrap = This.WrapSql(lcEngine, tcSql, lcCols)
+		IF EMPTY(lcWrap)
+			This.cLastShort = lcShort
+			This.cLastShortWhy = "order_by"
+			This.cLastShortEngine = lcEngine
+			RETURN .T.
+		ENDIF
+		lnRows = This.nLastRows
+		llTrunc = This.lLastTruncated
+		lcTmp = "FDW" + SYS(2015)
+		IF !This.Query(tcId, lcWrap, tnMax, lcTmp)
+			This.cLastError = ""
+			This.nLastRows = lnRows
+			This.lLastTruncated = llTrunc
+			This.cLastShort = lcShort
+			This.cLastShortWhy = "wrap_failed"
+			This.cLastShortEngine = lcEngine
+			RETURN .T.
+		ENDIF
+		*-- La relectura, con el alias de la primera: INTO CURSOR no acepta el nombre
+		*-- de uno abierto.
+		SET DATASESSION TO 1
+		llOk = .T.
+		TRY
+			USE IN (tcAlias)
+			SELECT * FROM &lcTmp INTO CURSOR (tcAlias) READWRITE
+		CATCH TO loErr
+			llOk = .F.
+			lcErr = TRANSFORM(loErr.ErrorNo) + " " + loErr.Message
+		ENDTRY
+		IF USED(lcTmp)
+			USE IN (lcTmp)
+		ENDIF
+		SET DATASESSION TO (lnDs)
+		IF !llOk
+			This.cLastError = "The query on '" + tcId + "' was read again and could not be kept: " + lcErr
+		ENDIF
+		RETURN llOk
+	ENDPROC
+
+	*-- Con qué CAST se vuelve a leer una columna de un SQL escrito a mano, de su
+	*-- tipo en la primera lectura, o "" si llega entera. Es el de ReadCast, sin
+	*-- catálogo, y por el tipo, no por los valores: en SQL Server, un Q(0) o un C(0),
+	*-- que llegan vacíos; en MySQL y MariaDB, un C(255), que solo sale de un LONGTEXT
+	*-- (o de un JSON de MariaDB), cortado; en MySQL además un C(252), que es como
+	*-- llega su JSON (un VARCHAR(252) también llega así, y se relee como memo).
+	PROCEDURE ShortCast
+		LPARAMETERS tcEngine, tcType, tnWidth
+		DO CASE
+			CASE tcEngine == "sqlserver"
+				RETURN This.ReadCast(tcEngine, tcType, tnWidth, "", "")
+			CASE INLIST(tcEngine, "mysql", "mariadb") AND tcType == "C" AND (tnWidth = 255 OR (tnWidth = 252 AND tcEngine == "mysql"))
+				RETURN This.ReadCast(tcEngine, tcType, tnWidth, "c", ",c,")
+		ENDCASE
+		RETURN ""
+	ENDPROC
+
+	*-- Las columnas del cursor tcAlias (sesión en curso) que no llegan enteras,
+	*-- «,nombre:CAST,» en minúsculas; vacío si todas llegan.
+	PROCEDURE ShortColumns
+		LPARAMETERS tcEngine, tcAlias
+		LOCAL lnN, lnI, laF[1], lcOut, lcCast
+		lcOut = ""
+		lnN = AFIELDS(laF, tcAlias)
+		FOR lnI = 1 TO lnN
+			lcCast = This.ShortCast(tcEngine, laF[lnI, 2], laF[lnI, 3])
+			IF !EMPTY(lcCast)
+				lcOut = lcOut + "," + LOWER(laF[lnI, 1]) + ":" + lcCast
+			ENDIF
+		ENDFOR
+		RETURN IIF(EMPTY(lcOut), "", lcOut + ",")
+	ENDPROC
+
+	*-- La sentencia tcSql envuelta para volver a leerla: SELECT <columnas> FROM
+	*-- (<sentencia>) AS q. tcCols, «nombre:CAST,nombre:,...» en el orden de la
+	*-- primera lectura (el CAST vacío, la columna por su nombre). Con ORDER BY en
+	*-- cualquier sitio, "": una tabla derivada no garantiza el orden.
+	PROCEDURE WrapSql
+		LPARAMETERS tcEngine, tcSql, tcCols
+		LOCAL lcU, lcS, lcOut, lnI, lcC
+		lcU = " " + UPPER(CHRTRAN(tcSql, CHR(9) + CHR(10) + CHR(13) + "()", "     ")) + " "
+		DO WHILE "  " $ lcU
+			lcU = STRTRAN(lcU, "  ", " ")
+		ENDDO
+		IF " ORDER BY " $ lcU
+			RETURN ""
+		ENDIF
+		lcS = tcSql
+		DO WHILE INLIST(RIGHT(lcS, 1), ";", " ", CHR(9), CHR(10), CHR(13))
+			lcS = LEFT(lcS, LEN(lcS) - 1)
+		ENDDO
+		lcOut = ""
+		FOR lnI = 1 TO GETWORDCOUNT(tcCols, ",")
+			lcC = GETWORDNUM(tcCols, lnI, ",")
+			lcOut = lcOut + IIF(lnI = 1, "", ", ") + This.CastExpr(tcEngine, GETWORDNUM(lcC, 1, ":"), SUBSTR(lcC, AT(":", lcC) + 1))
+		ENDFOR
+		RETURN "SELECT " + lcOut + " FROM (" + lcS + ") AS q"
+	ENDPROC
+
+	*-- Lo que no llegó entero en el último QueryWhole, para leerlo: «nombre
+	*-- (CAST...)», separado por comas; vacío si todo llegó.
+	PROCEDURE ShortText
+		LOCAL lcOut, lnI, lcC
+		lcOut = ""
+		FOR lnI = 1 TO GETWORDCOUNT(This.cLastShort, ",")
+			lcC = GETWORDNUM(This.cLastShort, lnI, ",")
+			lcOut = lcOut + IIF(lnI = 1, "", ", ") + GETWORDNUM(lcC, 1, ":") + " (" + ;
+				This.CastExpr(This.cLastShortEngine, GETWORDNUM(lcC, 1, ":"), SUBSTR(lcC, AT(":", lcC) + 1)) + ")"
+		ENDFOR
+		RETURN lcOut
+	ENDPROC
+
+	*-- La línea del aviso de Query... para lo que no llegó entero, vacía si todo
+	*-- llegó: los nombres, el motivo y un CAST de ejemplo (el más corto), para que
+	*-- quepa en el aviso de pantalla (255 caracteres). En el idioma de FoxDock
+	*-- (tlLocal) o en inglés para el log, que lleva además el CAST de cada una.
+	PROCEDURE ShortNote
+		LPARAMETERS tlLocal
+		LOCAL lcKey, lcNames, lcOne, lcCast, lnI, lcC
+		IF EMPTY(This.cLastShort)
+			RETURN ""
+		ENDIF
+		lcNames = ""
+		lcOne = ""
+		FOR lnI = 1 TO GETWORDCOUNT(This.cLastShort, ",")
+			lcC = GETWORDNUM(This.cLastShort, lnI, ",")
+			lcNames = lcNames + IIF(lnI = 1, "", ", ") + GETWORDNUM(lcC, 1, ":")
+			lcCast = This.CastExpr(This.cLastShortEngine, GETWORDNUM(lcC, 1, ":"), SUBSTR(lcC, AT(":", lcC) + 1))
+			IF EMPTY(lcOne) OR LEN(lcCast) < LEN(lcOne)
+				lcOne = lcCast
+			ENDIF
+		ENDFOR
+		lcKey = IIF(This.cLastShortWhy == "order_by", "data.conn.queryNotWholeOrder", "data.conn.queryNotWholeWrap")
+		IF tlLocal
+			RETURN This.T(lcKey, lcNames, lcOne)
+		ENDIF
+		RETURN This.E(lcKey, lcNames, lcOne) + ". All of them: " + This.ShortText()
 	ENDPROC
 
 	*-- Lo que escribe el agente (ide_data_db_execute). allowWrite de la conexión
@@ -1759,22 +2041,13 @@ DEFINE CLASS DataConnections AS Custom
 		IF !This.Query(loC.cId, "SELECT *" + lcFrom, tnMax, tcAlias)
 			RETURN .F.
 		ENDIF
-		DO CASE
-			CASE loC.cEngine == "sqlserver"
-				lcOct = ""
-			CASE loC.cEngine == "firebird"
-				lcOct = This.FbOctets(loDb.nHandle, tcName)
-				IF EMPTY(lcOct)
-					RETURN .T.
-				ENDIF
-			CASE INLIST(loC.cEngine, "mysql", "mariadb")
-				lcOct = This.MyLongText(loDb.nHandle, tcName)
-				IF EMPTY(lcOct)
-					RETURN .T.
-				ENDIF
-			OTHERWISE
-				RETURN .T.
-		ENDCASE
+		IF !INLIST(loC.cEngine, "sqlserver", "firebird", "mysql", "mariadb")
+			RETURN .T.
+		ENDIF
+		lcOct = This.CastList(loC.cEngine, loDb.nHandle, tcName)
+		IF EMPTY(lcOct) AND !(loC.cEngine == "sqlserver")
+			RETURN .T.
+		ENDIF
 		SET DATASESSION TO 1
 		lnN = AFIELDS(laF, tcAlias)
 		SET DATASESSION TO (lnDs)
@@ -1782,19 +2055,8 @@ DEFINE CLASS DataConnections AS Custom
 		llLong = .F.
 		FOR lnI = 1 TO lnN
 			lcCast = This.ReadCast(loC.cEngine, laF[lnI, 2], laF[lnI, 3], LOWER(laF[lnI, 1]), lcOct)
-			IF lcCast == "TEXT"
-				llLong = .T.
-				lcCols = lcCols + IIF(lnI = 1, "", ", ") + "CAST(CAST(" + This.Quoted(loC.cEngine, laF[lnI, 1]) + ;
-					" AS VARCHAR(MAX)) AS TEXT) AS " + This.Quoted(loC.cEngine, laF[lnI, 1])
-			ELSE
-				IF !EMPTY(lcCast)
-					llLong = .T.
-					lcCols = lcCols + IIF(lnI = 1, "", ", ") + "CAST(" + This.Quoted(loC.cEngine, laF[lnI, 1]) + " AS " + lcCast + ;
-						") AS " + This.Quoted(loC.cEngine, laF[lnI, 1])
-					LOOP
-				ENDIF
-				lcCols = lcCols + IIF(lnI = 1, "", ", ") + This.Quoted(loC.cEngine, laF[lnI, 1])
-			ENDIF
+			llLong = llLong OR !EMPTY(lcCast)
+			lcCols = lcCols + IIF(lnI = 1, "", ", ") + This.CastExpr(loC.cEngine, laF[lnI, 1], lcCast)
 		ENDFOR
 		IF !llLong
 			RETURN .T.
@@ -1890,7 +2152,7 @@ DEFINE CLASS DataConnections AS Custom
 		LPARAMETERS toF, tcTable, tcDbc, tcView, tcCols, tcWhere, tlUpdatable, tlReplace
 		LOCAL loC, loDb, lcName, lcWhy, lcKey, lcCs, lcNo, lcConn, lcSql, lnI, lcCol, lnDs, lcOldDbc, llOpened, llMap, lcCmd, llBin
 		LOCAL loErr, lcErr, lnH, laF[1], lnN, lcField, llPwd, lnTry, lcMemo, llExists, llServer, llInUse, llReplaced, lcDsn, lcUse
-		LOCAL lcProbe, llProbe, laE[1]
+		LOCAL lcProbe, llProbe, laE[1], lcTypes, lcList, lcJson
 		loC = This.Find(toF.cConnId)
 		lcName = This.ObjectName(toF.cConnId, tcTable)
 		tcView = LOWER(ALLTRIM(tcView))
@@ -1933,9 +2195,12 @@ DEFINE CLASS DataConnections AS Custom
 		lcDsn = ""
 		lcUse = lcCs
 		lcSql = ""
+		lcTypes = This.ColumnTypes(loDb, lcName)
+		lcList = This.CastList(loC.cEngine, loDb.nHandle, lcName)
+		lcJson = IIF(loC.cEngine == "mysql" AND tlUpdatable, This.MyLongText(loDb.nHandle, lcName, "'json'"), "")
 		FOR lnI = 1 TO GETWORDCOUNT(tcCols, ",")
 			lcCol = ALLTRIM(GETWORDNUM(tcCols, lnI, ","))
-			lcSql = lcSql + IIF(lnI = 1, "", ", ") + This.Quoted(loC.cEngine, lcCol)
+			lcSql = lcSql + IIF(lnI = 1, "", ", ") + This.ViewColumn(loC.cEngine, lcCol, lcTypes, lcList)
 		ENDFOR
 		lcSql = "SELECT " + lcSql + " FROM " + This.Quoted(loC.cEngine, lcName)
 		lcProbe = lcSql + " WHERE 1=0 AND (" + tcWhere + ")"
@@ -2062,6 +2327,10 @@ DEFINE CLASS DataConnections AS Custom
 							*-- Una columna TEXT de SQLite llega como memo, y por la vista no se escribe
 							*-- (WhereType 3 da «Update conflict»; 1, la deja vacía).
 							lcMemo = lcMemo + IIF(EMPTY(lcMemo), "", ", ") + lcCol
+						CASE ("," + LOWER(lcCol) + ",") $ lcJson
+							*-- Un JSON de MySQL llega entero por el CAST, pero guardarlo da «Update
+							*-- conflict»: se lee y no se escribe.
+							lcMemo = lcMemo + IIF(EMPTY(lcMemo), "", ", ") + lcCol
 						OTHERWISE
 							=DBSETPROP(lcField, "Field", "Updatable", .T.)
 					ENDCASE
@@ -2118,11 +2387,11 @@ DEFINE CLASS DataConnections AS Custom
 			"), connection " + lcConn + " of the .dbc, without a password")
 		This.ExploreSay(toF, This.T(IIF(llReplaced, "data.view.remade", "data.view.made"), tcView, This.T(IIF(EMPTY(lcKey), "data.view.readOnly", "data.view.isUpdatable")), ;
 			tcDbc, lcConn, This.T(IIF(llPwd, "data.view.withPassword", "data.view.noPassword")), ;
-			IIF(EMPTY(lcMemo), "", This.T("data.view.notUpdatable", lcMemo)) + IIF(loC.cEngine == "sqlite", This.T("data.view.sqliteUtf8"), "") + ;
+			IIF(EMPTY(lcMemo), "", This.T(IIF(loC.cEngine == "mysql", "data.view.notUpdatableJson", "data.view.notUpdatable"), lcMemo)) + IIF(loC.cEngine == "sqlite", This.T("data.view.sqliteUtf8"), "") + ;
 			IIF(llPwd, This.T("data.view.askLogin", tcView), "")), ;
 			This.E(IIF(llReplaced, "data.view.remade", "data.view.made"), tcView, This.E(IIF(EMPTY(lcKey), "data.view.readOnly", "data.view.isUpdatable")), ;
 			tcDbc, lcConn, This.E(IIF(llPwd, "data.view.withPassword", "data.view.noPassword")), ;
-			IIF(EMPTY(lcMemo), "", This.E("data.view.notUpdatable", lcMemo)) + IIF(loC.cEngine == "sqlite", This.E("data.view.sqliteUtf8"), "") + ;
+			IIF(EMPTY(lcMemo), "", This.E(IIF(loC.cEngine == "mysql", "data.view.notUpdatableJson", "data.view.notUpdatable"), lcMemo)) + IIF(loC.cEngine == "sqlite", This.E("data.view.sqliteUtf8"), "") + ;
 			IIF(llPwd, This.E("data.view.askLogin", tcView), "")))
 		*-- La que abre Open.
 		IF PEMSTATUS(toF, "cmdOpen", 5)
@@ -2732,14 +3001,16 @@ DEFINE CLASS DataConnections AS Custom
 		tnLimit = MAX(INT(tnLimit), 0)
 		lcCur = This.CursorName(tcId, "query")
 		This.cLastCursor = ""
-		IF !This.Query(tcId, tcSql, tnLimit, lcCur)
+		IF !This.QueryWhole(tcId, tcSql, tnLimit, lcCur)
 			This.oHost.NotifyQuoted("data.said", This.cLastError)
 			RETURN .F.
 		ENDIF
 		This.cLastCursor = lcCur
 		This.Browse(lcCur)
-		This.oHost.Notify(This.T("data.conn.queryRows", This.nLastRows, loC.cName, IIF(This.lLastTruncated, This.T("data.conn.firstN", tnLimit), ""), lcCur), ;
-			This.E("data.conn.queryRows", This.nLastRows, loC.cName, IIF(This.lLastTruncated, This.E("data.conn.firstN", tnLimit), ""), lcCur))
+		This.oHost.Notify(This.T("data.conn.queryRows", This.nLastRows, loC.cName, IIF(This.lLastTruncated, This.T("data.conn.firstN", tnLimit), ""), lcCur) + ;
+			This.ShortNote(.T.), ;
+			This.E("data.conn.queryRows", This.nLastRows, loC.cName, IIF(This.lLastTruncated, This.E("data.conn.firstN", tnLimit), ""), lcCur) + ;
+			This.ShortNote(.F.))
 		RETURN .T.
 	ENDPROC
 
