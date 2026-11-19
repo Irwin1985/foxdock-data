@@ -4,8 +4,9 @@
 *
 *   Data > Connections >   una barra por conexión (las del proyecto primero,
 *                          con «(project)»), y en cada una Connect...,
-*                          Disconnect, Explore... y Query...; al final Edit
-*                          connections... y Reload
+*                          Disconnect, Explore... y Query..., y, si lleva
+*                          contraseña, Forget password (en gris sin una
+*                          guardada); al final Edit connections... y Reload
 *   tools                  ide_data_db_connections, ide_data_db_tables,
 *                          ide_data_db_describe e ide_data_db_query (leen)
 *
@@ -33,9 +34,12 @@
 * el combo deshabilitado), la lista de tablas y vistas con un filtro al
 * teclear, y Columns y Browse de la elegida, cada una en un BROWSE de solo
 * lectura (Browse con el límite de Query..., 0 = sin límite). Las bases y las
-* vistas las da FoxRemote (GetDatabases y GetObjects). Elegir otra base es
-* UseDatabase de FoxRemote, que vuelve a conectar: con contraseña, solo si
-* está guardada. La ventana se cierra sola, con sus cursores, al cerrarse la
+* vistas las da FoxRemote (GetDatabases y GetObjects). Elegir otra base, en
+* SQL Server, MySQL y MariaDB, es un USE en la misma conexión, sin la
+* contraseña; si el USE falla, y en PostgreSQL, es UseDatabase de FoxRemote,
+* que vuelve a conectar: con contraseña, solo si está guardada. Query..., en
+* la ventana, abre la de Query... con un SELECT de la elegida para empezar.
+* La ventana se cierra sola, con sus cursores, al cerrarse la
 * conexión (Disconnect), al releer las conexiones (Reload) y al apagarse el
 * módulo.
 *
@@ -63,7 +67,9 @@
 * abre con USE ... CONNSTRING; la ventanita enseña la línea.
 *
 * Query... lee como mucho las filas de su límite: 100 de entrada, 0 = sin
-* límite, y lo recuerda en data.connections.queryLimit.
+* límite, y lo recuerda en data.connections.queryLimit. Escribe en las
+* conexiones con allowWrite, con las reglas de ide_data_db_execute (Execute
+* con tlIde); lo que toca la tabla entera lo confirma en la ventana.
 *
 * NUNCA UNA CONTRASEÑA EN EL FICHERO. Un fichero que trae una clave password,
 * pwd, passwd, secret o pass, o un valor con «pwd=» o «password=», no se lee
@@ -105,11 +111,13 @@ DEFINE CLASS DataConnections AS Custom
 	cClosing = ""         && el proyecto que se está cerrando (OnProjectClose): ya no cuenta
 	cLastError = ""
 	lNeedsConnectBar = .F. && el último fallo fue que falta la contraseña
+	lNeedsWhole = .F.      && Execute no corrió porque toca la tabla entera (Query... lo confirma)
 	nLastRows = 0
 	lLastTruncated = .F.
 	cLastShort = ""       && QueryWhole: «,columna:CAST,» de lo que no llegó entero (vacío si todo llegó)
 	cLastShortWhy = ""    && por qué no se releyó: order_by o wrap_failed
 	cLastShortEngine = "" && el motor de esa consulta, para escribir el CAST con sus comillas
+	cLastWrapSql = ""     && QueryWhole: la sentencia con la que releyó entero (vacía si no hizo falta)
 	cLastQueryAlias = ""
 	cLastTitle = ""       && el título del último BROWSE (lo leen los tests)
 	cLastCursor = ""      && el cursor del último RunQuery que salió bien (Query... lo apunta)
@@ -237,6 +245,7 @@ DEFINE CLASS DataConnections AS Custom
 		ENDFOR
 		This.oHost.Log("data.connections: " + TRANSFORM(This.oList.Count) + " connection(s)" + ;
 			IIF(EMPTY(lcProject), " (no project open)", ""))
+		This.RefillConns()
 		RETURN This.oList.Count
 	ENDPROC
 
@@ -465,10 +474,20 @@ DEFINE CLASS DataConnections AS Custom
 
 	PROCEDURE ForgetSecret
 		LPARAMETERS tcId
+		LOCAL loErr
 		IF This.HasSavedSecret(tcId)
-			*-- Se borra igual, porque la conexión se fue. Si VFP corre dentro de un
-			*-- paquete MSIX, el borrado alcanza también al fichero real, y el log lo dice.
-			ERASE (This.SecretFile(tcId))
+			*-- Si VFP corre dentro de un paquete MSIX, el borrado alcanza también al
+			*-- fichero real, y el log lo dice. Si no se puede borrar, HasSavedSecret
+			*-- sigue diciendo .T.: lo mira quien llama.
+			TRY
+				ERASE (This.SecretFile(tcId))
+			CATCH TO loErr
+				This.oHost.LogWarn("data.connections: the kept password of '" + tcId + "' could not be removed: " + ;
+					TRANSFORM(loErr.ErrorNo) + " " + loErr.Message)
+			ENDTRY
+			IF This.HasSavedSecret(tcId)
+				RETURN
+			ENDIF
 			This.oHost.Log("data.connections: the kept password of '" + tcId + "' was removed" + ;
 				IIF(PEMSTATUS(This.oHost, "lDataShadowed", 5) AND This.oHost.lDataShadowed, ;
 				" (inside the package " + This.oHost.cPackage + ": the real file is gone too)", ""))
@@ -564,8 +583,9 @@ DEFINE CLASS DataConnections AS Custom
 		This.oHost.Log("data.connections: connected to '" + loC.cId + "' (" + loC.cEngine + ", " + ;
 			IIF(EMPTY(loC.cServer), "", loC.cServer + ", ") + ;
 			IIF(EMPTY(loC.cDatabase), "no database given: the server's default, " + This.CurrentDatabase(loC.cId), loC.cDatabase) + ")")
-		*-- El menú dice qué conexión está conectada.
+		*-- El menú y el selector de las ventanas dicen qué conexión está conectada.
 		This.oHost.RefreshMenu()
+		This.RefillConns()
 		RETURN .T.
 	ENDPROC
 
@@ -698,6 +718,52 @@ DEFINE CLASS DataConnections AS Custom
 		RETURN This.oHost.Quoted(tcWhy)
 	ENDPROC
 
+	*-- La conexión actual, la de Explore... y Query... del menú Data: la guardada
+	*-- en options.data.connections.current si sigue en la lista; si no, la primera
+	*-- conectada; si no, la primera de la lista. "" sin conexiones. No escribe
+	*-- nada: la cambian Use this connection y Connect... desde su barra.
+	PROCEDURE Current
+		LOCAL luV, lcId, loC
+		IF VARTYPE(This.oList) # "O" OR This.oList.Count = 0
+			RETURN ""
+		ENDIF
+		luV = This.oHost.Options.Get("data", "connections.current", "")
+		lcId = LOWER(ALLTRIM(IIF(VARTYPE(luV) == "C", luV, "")))
+		loC = IIF(EMPTY(lcId), .NULL., This.Find(lcId))
+		IF !ISNULL(loC)
+			RETURN loC.cId
+		ENDIF
+		FOR EACH loC IN This.oList FOXOBJECT
+			IF This.IsConnected(loC.cId)
+				RETURN loC.cId
+			ENDIF
+		ENDFOR
+		RETURN This.oList.Item(1).cId
+	ENDPROC
+
+	*-- Hace actual tcId: se guarda (si no lo estaba ya) y el menú se rehace.
+	*-- .F. si no está en la lista.
+	PROCEDURE SetCurrent
+		LPARAMETERS tcId
+		LOCAL loC, luV
+		loC = This.Find(tcId)
+		IF ISNULL(loC)
+			RETURN .F.
+		ENDIF
+		luV = This.oHost.Options.Get("data", "connections.current", "")
+		IF !(VARTYPE(luV) == "C" AND LOWER(ALLTRIM(luV)) == loC.cId)
+			This.oHost.Options.Set("data", "connections.current", loC.cId)
+		ENDIF
+		This.oHost.RefreshMenu()
+		RETURN .T.
+	ENDPROC
+
+	*-- El nombre de una conexión como va en el menú.
+	PROCEDURE MenuName
+		LPARAMETERS toC
+		RETURN CHRTRAN(toC.cName, "[]\", "()/")
+	ENDPROC
+
 	*-- El límite de filas de Query... (0 = sin límite), y guardarlo.
 	PROCEDURE QueryLimit
 		LOCAL lnN
@@ -767,6 +833,7 @@ DEFINE CLASS DataConnections AS Custom
 		*-- El menú deja de decir «(connected)»; no al cerrarlas todas.
 		IF !This.lClosing
 			This.oHost.RefreshMenu()
+			This.RefillConns()
 		ENDIF
 		RETURN .T.
 	ENDPROC
@@ -1206,6 +1273,7 @@ DEFINE CLASS DataConnections AS Custom
 		This.cLastShort = ""
 		This.cLastShortWhy = ""
 		This.cLastShortEngine = ""
+		This.cLastWrapSql = ""
 		IF !This.Query(tcId, tcSql, tnMax, tcAlias)
 			RETURN .F.
 		ENDIF
@@ -1265,6 +1333,8 @@ DEFINE CLASS DataConnections AS Custom
 		SET DATASESSION TO (lnDs)
 		IF !llOk
 			This.cLastError = "The query on '" + tcId + "' was read again and could not be kept: " + lcErr
+		ELSE
+			This.cLastWrapSql = lcWrap
 		ENDIF
 		RETURN llOk
 	ENDPROC
@@ -1368,26 +1438,33 @@ DEFINE CLASS DataConnections AS Custom
 		RETURN This.E(lcKey, lcNames, lcOne) + ". All of them: " + This.ShortText()
 	ENDPROC
 
-	*-- Lo que escribe el agente (ide_data_db_execute). allowWrite de la conexión
-	*-- manda; una sola sentencia de las siete de CheckWrite; un UPDATE o un
-	*-- DELETE sin WHERE, un DROP y un TRUNCATE, solo con tlWholeTable. Cada
-	*-- sentencia queda hecha al volver (autocommit). Lo que hace y lo que se le
-	*-- niega va al log, para que el usuario vea qué tocó el agente. .F. con el
-	*-- motivo en cLastError.
+	*-- Lo que escribe el agente (ide_data_db_execute) y, con tlIde, Query... en el
+	*-- IDE. allowWrite de la conexión manda; una sola sentencia de las siete de
+	*-- CheckWrite; un UPDATE o un DELETE sin WHERE, un DROP y un TRUNCATE, solo con
+	*-- tlWholeTable (sin él, lNeedsWhole). Cada sentencia queda hecha al volver
+	*-- (autocommit). Lo que hace y lo que se le niega va al log, para que el
+	*-- usuario vea qué se tocó y quién. .F. con el motivo en cLastError: en
+	*-- inglés para el agente; con tlIde, en el idioma de FoxDock.
 	PROCEDURE Execute
-		LPARAMETERS tcId, tcSql, tlWholeTable
-		LOCAL loC, loG, lcWhy, loDb, lnT0, lnR, lcErr, loErr, lnDs, lcShort
+		LPARAMETERS tcId, tcSql, tlWholeTable, tlIde
+		LOCAL loC, loG, lcWhy, loDb, lnT0, lnR, lcErr, loErr, lnDs, lcShort, lcWho, lcLog
 		This.cLastError = ""
 		This.cLastCode = ""
 		This.cLastStatement = ""
 		This.nLastAffected = 0
 		This.nLastMs = 0
+		This.lNeedsWhole = .F.
+		lcWho = IIF(tlIde, "Query...", "the agent")
 		lcShort = LEFT(ALLTRIM(CHRTRAN(TRANSFORM(tcSql), CHR(13) + CHR(10) + CHR(9), "   ")), 200)
 		loC = This.Find(tcId)
 		loG = CREATEOBJECT("DataSqlGuard")
+		lcLog = ""
 		DO CASE
 			CASE ISNULL(loC)
 				This.cLastError = This.NoSuch(tcId)
+			CASE !loC.lAllowWrite AND tlIde
+				This.cLastError = This.T("data.query.noWrite", loC.cName)
+				lcLog = This.E("data.query.noWrite", loC.cName)
 			CASE !loC.lAllowWrite
 				This.cLastError = "The connection " + loC.cName + " does not allow writes: allowWrite is false in " + loC.cFile + ;
 					". It is the programmer's key, connection by connection: to allow it, set " + ["allowWrite": true] + ;
@@ -1396,17 +1473,23 @@ DEFINE CLASS DataConnections AS Custom
 			OTHERWISE
 				loG.cEngine = loC.cEngine
 				lcWhy = loG.CheckWrite(tcSql, tlWholeTable)
-				IF !EMPTY(lcWhy)
-					This.cLastError = "Not run: " + lcWhy + ". Nothing was sent to the server."
-				ENDIF
+				DO CASE
+					CASE EMPTY(lcWhy)
+					CASE tlIde
+						This.lNeedsWhole = loG.cCode == "whole"
+						This.cLastError = This.WriteRefusal(loG, .F.)
+						lcLog = This.WriteRefusal(loG, .T.)
+					OTHERWISE
+						This.cLastError = "Not run: " + lcWhy + ". Nothing was sent to the server."
+				ENDCASE
 		ENDCASE
 		IF !EMPTY(This.cLastError)
-			This.oHost.LogWarn("data.connections: the agent was refused a write on '" + LOWER(ALLTRIM(TRANSFORM(tcId))) + "': " + ;
-				lcShort + " (" + This.cLastError + ")")
+			This.oHost.LogWarn("data.connections: " + lcWho + " was refused a write on '" + LOWER(ALLTRIM(TRANSFORM(tcId))) + "': " + ;
+				lcShort + " (" + EVL(lcLog, This.cLastError) + ")")
 			RETURN .F.
 		ENDIF
 		IF !This.Ready(loC.cId)
-			This.oHost.LogWarn("data.connections: the agent's write on '" + loC.cId + "' was not run: " + This.cLastError)
+			This.oHost.LogWarn("data.connections: " + lcWho + "'s write on '" + loC.cId + "' was not run: " + This.cLastError)
 			RETURN .F.
 		ENDIF
 		lcShort = LEFT(ALLTRIM(CHRTRAN(loG.cSql, CHR(13) + CHR(10) + CHR(9), "   ")), 200)
@@ -1424,17 +1507,36 @@ DEFINE CLASS DataConnections AS Custom
 		This.nLastMs = INT((SECONDS() - lnT0) * 1000)
 		SET DATASESSION TO (lnDs)
 		IF lnR < 0
-			IF !This.CheckLost(loC.cId, EVL(lcErr, loDb.cLastError))
-				This.cLastError = "The statement on '" + loC.cId + "' failed: " + EVL(lcErr, loDb.cLastError)
+			lcErr = EVL(lcErr, loDb.cLastError)
+			IF !This.CheckLost(loC.cId, lcErr)
+				This.cLastError = IIF(tlIde, This.T("data.query.writeFailed", lcErr), "The statement on '" + loC.cId + "' failed: " + lcErr)
 			ENDIF
-			This.oHost.LogWarn("data.connections: the agent's write on '" + loC.cId + "' failed: " + lcShort + " (" + This.cLastError + ")")
+			This.oHost.LogWarn("data.connections: " + lcWho + "'s write on '" + loC.cId + "' failed: " + lcShort + " (" + lcErr + ")")
 			RETURN .F.
 		ENDIF
 		This.cLastStatement = loG.cStatement
 		This.nLastAffected = lnR
-		This.oHost.Log("data.connections: the agent wrote on '" + loC.cId + "': " + lcShort + " (" + TRANSFORM(lnR) + " row(s), " + ;
+		This.oHost.Log("data.connections: " + lcWho + " wrote on '" + loC.cId + "': " + lcShort + " (" + TRANSFORM(lnR) + " row(s), " + ;
 			TRANSFORM(This.nLastMs) + " ms)")
 		RETURN .T.
+	ENDPROC
+
+	*-- Por qué Query... no corre una escritura, del código de CheckWrite (cCode y
+	*-- cWord del guardia), en el idioma de FoxDock o, con tlEn, en inglés (el log).
+	PROCEDURE WriteRefusal
+		LPARAMETERS toG, tlEn
+		LOCAL lcKey
+		lcKey = "data.query." + IIF(toG.cCode == "whole", "whole" + toG.cWord, toG.cCode)
+		RETURN IIF(tlEn, This.E(lcKey, toG.cWord), This.T(lcKey, toG.cWord))
+	ENDPROC
+
+	*-- ¿Lee tcSql? Un SELECT o un WITH (sin contar comentarios ni literales) va
+	*-- por Query y su tope; lo demás, por Execute.
+	PROCEDURE IsRead
+		LPARAMETERS tcSql
+		LOCAL loG
+		loG = CREATEOBJECT("DataSqlGuard")
+		RETURN INLIST(loG.FirstWord(tcSql), "SELECT", "WITH")
 	ENDPROC
 
 	*-- Las filas de un cursor de la sesión 1 en JSON, como ide_data_to_json
@@ -1465,11 +1567,19 @@ DEFINE CLASS DataConnections AS Custom
 	*--------------------------------------------------------------
 	PROCEDURE FillMenu
 		LPARAMETERS tcPopup, tnBar
-		LOCAL loP, loC, lnI, lnB, lcSub, lcCaption, lcCon, llOn
+		LOCAL loP, loC, lnI, lnB, lcSub, lcCaption, lcCon, llOn, lcCur, loCur, lcName, lnK
 		loP = This.Plugin()
 		lcCon = tcPopup + "C"
 		tnBar = loP.DefineBar(tcPopup, tnBar + 1, "", "", "", "")
-		*-- En el idioma de FoxDock (DataStrings.prg).
+		*-- Explore... y Query... de la conexión actual, con su nombre; sin
+		*-- conexiones, en gris y sin nombre. En el idioma de FoxDock (DataStrings.prg).
+		lcCur = This.Current()
+		loCur = IIF(EMPTY(lcCur), .NULL., This.Find(lcCur))
+		lcName = IIF(ISNULL(loCur), "", This.MenuName(loCur))
+		tnBar = loP.DefineBar(tcPopup, tnBar + 1, This.T("data.conn.explore") + IIF(EMPTY(lcName), "", " (" + lcName + ")"), "DbExplore", "", ;
+			IIF(EMPTY(lcName), This.T("data.conn.none.message"), This.T("data.conn.explore.message", lcName)), ISNULL(loCur))
+		tnBar = loP.DefineBar(tcPopup, tnBar + 1, This.T("data.conn.query") + IIF(EMPTY(lcName), "", " (" + lcName + ")"), "DbQuery", "", ;
+			IIF(EMPTY(lcName), This.T("data.conn.none.message"), This.T("data.conn.query.message")), ISNULL(loCur))
 		tnBar = loP.DefineSubmenu(tcPopup, tnBar + 1, This.T("data.conn.menu"), lcCon)
 		lnB = 0
 		lnI = 0
@@ -1480,14 +1590,23 @@ DEFINE CLASS DataConnections AS Custom
 			*-- El menú se rehace al conectar, al desconectar, al perderse una y al
 			*-- recargar.
 			llOn = This.IsConnected(loC.cId)
-			lcCaption = CHRTRAN(loC.cName, "[]\", "()/") + IIF(loC.cOrigin == "project", This.T("data.conn.project"), "") + ;
-				IIF(llOn, This.T("data.conn.connectedMark"), "")
+			*-- La actual lleva su marca, de texto: VFP pinta él sus menús (no hay un
+			*-- menú de Windows) y SET MARK OF BAR en una barra que abre un submenú no
+			*-- se puede comprobar sin abrirlo.
+			lcCaption = This.MenuName(loC) + IIF(loC.cOrigin == "project", This.T("data.conn.project"), "") + ;
+				IIF(loC.cId == lcCur, This.T("data.conn.currentMark"), "") + IIF(llOn, This.T("data.conn.connectedMark"), "")
 			lnB = loP.DefineSubmenu(lcCon, lnB + 1, lcCaption, lcSub)
 			=loP.DefineBar(lcSub, 1, This.T("data.conn.connect"), "DbConnect", loC.cId, This.T("data.conn.connect.message", loC.cName, loC.cEngine), llOn)
 			=loP.DefineBar(lcSub, 2, This.T("data.conn.disconnect"), "DbDisconnect", loC.cId, This.T("data.conn.disconnect.message", loC.cName), !llOn)
 			=loP.DefineBar(lcSub, 3, "", "", "", "")
-			=loP.DefineBar(lcSub, 4, This.T("data.conn.explore"), "DbExplore", loC.cId, This.T("data.conn.explore.message", loC.cName))
-			=loP.DefineBar(lcSub, 5, This.T("data.conn.query"), "DbQuery", loC.cId, This.T("data.conn.query.message"))
+			=loP.DefineBar(lcSub, 4, This.T("data.conn.use"), "DbUse", loC.cId, This.T("data.conn.use.message", This.MenuName(loC)), loC.cId == lcCur)
+			*-- Olvidar la contraseña guardada con Remember: solo en las que la llevan,
+			*-- y en gris sin una guardada.
+			IF This.NeedsSecret(loC)
+				=loP.DefineBar(lcSub, 5, "", "", "", "")
+				=loP.DefineBar(lcSub, 6, This.T("data.conn.forget"), "DbForget", loC.cId, This.T("data.conn.forget.message", loC.cName), ;
+					!This.HasSavedSecret(loC.cId))
+			ENDIF
 		ENDFOR
 		IF lnI = 0
 			lnB = loP.DefineBar(lcCon, lnB + 1, This.T("data.conn.none"), "DbEdit", "", This.T("data.conn.none.message"))
@@ -1522,15 +1641,80 @@ DEFINE CLASS DataConnections AS Custom
 			CASE This.IsConnected(loC.cId)
 				This.oHost.NotifyKey("data.conn.already", loC.cName)
 			CASE This.NeedsSecret(loC) AND !This.HasSavedSecret(loC.cId)
-				This.ShowForm("DataConnectForm", loC)
+				This.ConnectForm(loC)
 			CASE This.Connect(loC.cId, "", .F.)
+				This.SetCurrent(loC.cId)
 				This.oHost.NotifyKey("data.conn.connected", loC.cName)
 			OTHERWISE
 				This.oHost.NotifyQuoted("data.said", This.cLastError)
 				IF This.lNeedsConnectBar
-					This.ShowForm("DataConnectForm", loC)
+					This.ConnectForm(loC)
 				ENDIF
 		ENDCASE
+	ENDPROC
+
+	*-- La ventana de la contraseña abierta desde Connect...: si conecta, la hace
+	*-- la actual.
+	PROCEDURE ConnectForm
+		LPARAMETERS toC
+		LOCAL loF
+		loF = This.ShowForm("DataConnectForm", toC)
+		loF.lMakeCurrent = .T.
+		RETURN loF
+	ENDPROC
+
+	*-- Use this connection: la hace la actual. El aviso lo dice.
+	PROCEDURE UseBar
+		LPARAMETERS tcId
+		LOCAL loC
+		loC = This.Find(tcId)
+		IF ISNULL(loC)
+			This.oHost.NotifyQuoted("data.said", This.NoSuch(tcId))
+			RETURN .F.
+		ENDIF
+		This.SetCurrent(loC.cId)
+		This.oHost.NotifyKey("data.conn.nowCurrent", This.MenuName(loC))
+		RETURN .T.
+	ENDPROC
+
+	*-- La conexión de una barra: la del parámetro, o sin él la actual. "" sin
+	*-- conexiones, y el aviso lo dice.
+	PROCEDURE BarConn
+		LPARAMETERS tcId
+		LOCAL lcId
+		lcId = IIF(VARTYPE(tcId) == "C", ALLTRIM(tcId), "")
+		IF EMPTY(lcId)
+			lcId = This.Current()
+			IF EMPTY(lcId)
+				This.oHost.NotifyKey("data.conn.noCurrent")
+			ENDIF
+		ENDIF
+		RETURN lcId
+	ENDPROC
+
+	*-- Forget password: borra la contraseña guardada con Remember. La conexión
+	*-- abierta sigue abierta; el próximo Connect... la pide. El aviso lo dice y
+	*-- el menú pone la barra en gris.
+	PROCEDURE ForgetBar
+		LPARAMETERS tcId
+		LOCAL loC
+		loC = This.Find(tcId)
+		DO CASE
+			CASE ISNULL(loC)
+				This.oHost.NotifyQuoted("data.said", This.NoSuch(tcId))
+				RETURN .F.
+			CASE !This.HasSavedSecret(loC.cId)
+				This.oHost.NotifyKey("data.conn.noKept", loC.cName)
+				RETURN .F.
+		ENDCASE
+		This.ForgetSecret(loC.cId)
+		IF This.HasSavedSecret(loC.cId)
+			This.oHost.NotifyKey("data.conn.forgetFailed", loC.cName, This.SecretFile(loC.cId))
+			RETURN .F.
+		ENDIF
+		This.oHost.NotifyKey("data.conn.forgotten", loC.cName)
+		This.oHost.RefreshMenu()
+		RETURN .T.
 	ENDPROC
 
 	PROCEDURE DisconnectBar
@@ -1545,6 +1729,29 @@ DEFINE CLASS DataConnections AS Custom
 			OTHERWISE
 				This.oHost.NotifyKey("data.conn.notConnected", loC.cName)
 		ENDCASE
+	ENDPROC
+
+	*-- ¿Lista para trabajar? Para el selector de Explore... y Query...: lo mismo
+	*-- que una barra (conecta, o lo dice y abre Connect... si falta la contraseña).
+	PROCEDURE ReadyFor
+		LPARAMETERS tcId
+		RETURN This.BarReady(tcId)
+	ENDPROC
+
+	*-- El selector de las ventanas abiertas, otra vez: la lista o su estado cambió.
+	PROCEDURE RefillConns
+		LOCAL loF, loErr
+		IF VARTYPE(This.oForms) # "O"
+			RETURN
+		ENDIF
+		FOR EACH loF IN This.oForms FOXOBJECT
+			TRY
+				IF PEMSTATUS(loF, "FillConns", 5)
+					loF.FillConns()
+				ENDIF
+			CATCH TO loErr
+			ENDTRY
+		ENDFOR
 	ENDPROC
 
 	*-- Conectada, o lo dice (y abre Connect... si falta la contraseña).
@@ -1573,7 +1780,8 @@ DEFINE CLASS DataConnections AS Custom
 	PROCEDURE ExploreBar
 		LPARAMETERS tcId
 		LOCAL loC, loF
-		IF !This.BarReady(tcId)
+		tcId = This.BarConn(tcId)
+		IF EMPTY(tcId) OR !This.BarReady(tcId)
 			RETURN .NULL.
 		ENDIF
 		loC = This.Find(tcId)
@@ -1768,15 +1976,18 @@ DEFINE CLASS DataConnections AS Custom
 		RETURN lcName
 	ENDPROC
 
-	*-- La conexión a otra base del mismo servidor, con UseDatabase de FoxRemote,
-	*-- que desconecta y vuelve a conectar. El objeto ya no tiene la contraseña
-	*-- (se borra al conectar), y sin ella falla y deja la conexión cerrada: se le
-	*-- da la guardada solo mientras dura, y sin una guardada no se intenta. Si
-	*-- falla, se vuelve a la base de antes; si ni eso, la conexión se da por
-	*-- cerrada (Disconnect: la ventana se va).
+	*-- La conexión a otra base del mismo servidor. En SQL Server, MySQL y
+	*-- MariaDB, primero un USE en la misma conexión (UseOnSameConnection), que no
+	*-- necesita la contraseña. Si el USE no vale (Azure SQL Database no lo admite,
+	*-- y un usuario contenido no sale de su base) y en PostgreSQL, que no tiene
+	*-- USE, UseDatabase de FoxRemote, que desconecta y vuelve a conectar. El
+	*-- objeto ya no tiene la contraseña (se borra al conectar), y sin ella falla y
+	*-- deja la conexión cerrada: se le da la guardada solo mientras dura, y sin
+	*-- una guardada no se intenta. Si falla, se vuelve a la base de antes; si ni
+	*-- eso, la conexión se da por cerrada (Disconnect: la ventana se va).
 	PROCEDURE UseDatabase
 		LPARAMETERS tcId, tcDatabase
-		LOCAL loC, loDb, lcPwd, llOk, lcWhy, lcOld
+		LOCAL loC, loDb, lcPwd, llOk, lcWhy, lcOld, lcUseWhy
 		This.cLastError = ""
 		tcDatabase = ALLTRIM(TRANSFORM(tcDatabase))
 		loC = This.Find(tcId)
@@ -1795,13 +2006,28 @@ DEFINE CLASS DataConnections AS Custom
 		IF LOWER(lcOld) == LOWER(tcDatabase)
 			RETURN .T.
 		ENDIF
+		lcUseWhy = ""
+		IF INLIST(loC.cEngine, "sqlserver", "mysql", "mariadb")
+			IF This.UseOnSameConnection(loC, tcDatabase)
+				This.oHost.Log("data.connections: '" + loC.cId + "' is now in the database " + This.CurrentDatabase(loC.cId) + ;
+					" (it was in " + lcOld + "; USE on the same connection)")
+				RETURN .T.
+			ENDIF
+			IF !This.IsConnected(loC.cId)
+				*-- Se perdió: Lost lo ha dicho (cLastError) y ha cerrado la ventana.
+				RETURN .F.
+			ENDIF
+			lcUseWhy = This.cLastError
+			This.cLastError = ""
+		ENDIF
 		lcPwd = ""
 		IF This.NeedsSecret(loC)
 			lcPwd = This.ReadSecret(loC.cId)
 			IF EMPTY(lcPwd)
-				This.cLastError = "Changing the database opens a new connection to the server, and that needs the password of '" + ;
-					loC.cUser + "', which FoxDock did not keep (Remember was not marked in Connect...). Disconnect, and Connect... " + ;
-					"with Remember; or put the database in connections.json. " + loC.cName + " is still in " + lcOld + "."
+				This.cLastError = IIF(EMPTY(lcUseWhy), "Changing the database opens a new connection to the server, and that needs", ;
+					"USE " + tcDatabase + " on the same connection failed: " + lcUseWhy + " A new connection to the server would need") + ;
+					" the password of '" + loC.cUser + "', which FoxDock did not keep (Remember was not marked in Connect...). " + ;
+					"Disconnect, and Connect... with Remember; or put the database in connections.json. " + loC.cName + " is still in " + lcOld + "."
 				This.oHost.LogWarn("data.connections: " + This.cLastError)
 				RETURN .F.
 			ENDIF
@@ -1810,6 +2036,9 @@ DEFINE CLASS DataConnections AS Custom
 		loDb.cPassword = lcPwd
 		llOk = loDb.UseDatabase(tcDatabase)
 		lcWhy = IIF(llOk, "", This.Scrub(loDb.cLastError, lcPwd))
+		IF !EMPTY(lcUseWhy)
+			lcWhy = lcWhy + IIF(EMPTY(lcWhy), "", " ") + "(USE on the same connection had failed: " + lcUseWhy + ")"
+		ENDIF
 		IF !llOk AND loDb.nHandle < 1
 			*-- Al fallar, la deja cerrada, con la base de antes en cDatabase.
 			=loDb.Connect()
@@ -1817,7 +2046,7 @@ DEFINE CLASS DataConnections AS Custom
 		loDb.cPassword = ""
 		IF llOk
 			This.oHost.Log("data.connections: '" + loC.cId + "' is now in the database " + This.CurrentDatabase(loC.cId) + ;
-				" (it was in " + lcOld + ")")
+				" (it was in " + lcOld + IIF(EMPTY(lcUseWhy), ")", "; a new connection, because USE on the same connection failed: " + lcUseWhy + ")"))
 			RETURN .T.
 		ENDIF
 		IF loDb.nHandle < 1
@@ -1829,6 +2058,37 @@ DEFINE CLASS DataConnections AS Custom
 			This.cLastError = "Changing '" + loC.cId + "' to the database " + tcDatabase + " failed: " + lcWhy + " " + ;
 				loC.cName + " is still in " + This.CurrentDatabase(loC.cId) + "."
 			This.oHost.LogWarn("data.connections: " + This.cLastError)
+		ENDIF
+		RETURN .F.
+	ENDPROC
+
+	*-- USE tcDatabase en la conexión viva de toC (SQL Server, MySQL y MariaDB),
+	*-- sin desconectar y sin la contraseña. cDatabase de FoxRemote pasa a esa
+	*-- base: es la que dicen CurrentDatabase y Create view..., y a la que vuelve
+	*-- una reconexión. .F. con lo que dijo el servidor en cLastError; si la
+	*-- conexión se perdió, pasa por Lost.
+	PROCEDURE UseOnSameConnection
+		LPARAMETERS toC, tcDatabase
+		LOCAL loDb, lnDs, lnR, lcErr, loErr
+		This.cLastError = ""
+		loDb = This.Live(toC.cId)
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		lcErr = ""
+		TRY
+			lnR = loDb.Execute("USE " + This.Quoted(toC.cEngine, tcDatabase))
+		CATCH TO loErr
+			lnR = -1
+			lcErr = TRANSFORM(loErr.ErrorNo) + " " + loErr.Message
+		ENDTRY
+		SET DATASESSION TO (lnDs)
+		IF lnR >= 0
+			loDb.cDatabase = tcDatabase
+			RETURN .T.
+		ENDIF
+		lcErr = EVL(lcErr, loDb.cLastError)
+		IF !This.CheckLost(toC.cId, lcErr)
+			This.cLastError = lcErr
 		ENDIF
 		RETURN .F.
 	ENDPROC
@@ -2147,9 +2407,11 @@ DEFINE CLASS DataConnections AS Custom
 	*-- Create view... de la ventanita toF: la vista tcView de tcTable en tcDbc
 	*-- (lo crea si no está), con las columnas tcCols (separadas por comas, como
 	*-- las da el servidor), tcWhere y tlUpdatable. tlReplace (Reemplazar): una
-	*-- vista con ese nombre se borra y se hace otra vez. .T. si la hizo.
+	*-- vista con ese nombre se borra y se hace otra vez. tcOrder, el orden de
+	*-- las filas como lo toma el motor (name DESC, id), con o sin ORDER BY
+	*-- delante. .T. si la hizo.
 	PROCEDURE CreateView
-		LPARAMETERS toF, tcTable, tcDbc, tcView, tcCols, tcWhere, tlUpdatable, tlReplace
+		LPARAMETERS toF, tcTable, tcDbc, tcView, tcCols, tcWhere, tlUpdatable, tlReplace, tcOrder
 		LOCAL loC, loDb, lcName, lcWhy, lcKey, lcCs, lcNo, lcConn, lcSql, lnI, lcCol, lnDs, lcOldDbc, llOpened, llMap, lcCmd, llBin
 		LOCAL loErr, lcErr, lnH, laF[1], lnN, lcField, llPwd, lnTry, lcMemo, llExists, llServer, llInUse, llReplaced, lcDsn, lcUse
 		LOCAL lcProbe, llProbe, laE[1], lcTypes, lcList, lcJson
@@ -2158,6 +2420,10 @@ DEFINE CLASS DataConnections AS Custom
 		tcView = LOWER(ALLTRIM(tcView))
 		tcDbc = ALLTRIM(tcDbc)
 		tcWhere = ALLTRIM(CHRTRAN(tcWhere, CHR(13) + CHR(10) + CHR(9), "   "))
+		tcOrder = ALLTRIM(CHRTRAN(IIF(VARTYPE(tcOrder) == "C", tcOrder, ""), CHR(13) + CHR(10) + CHR(9), "   "))
+		IF UPPER(GETWORDNUM(tcOrder, 1)) == "ORDER" AND UPPER(GETWORDNUM(tcOrder, 2)) == "BY"
+			tcOrder = ALLTRIM(SUBSTR(tcOrder, AT("BY", UPPER(tcOrder)) + 2))
+		ENDIF
 		*-- lcWhy, la clave de la cadena (o el cLastError, en inglés, entre «!»).
 		DO CASE
 			CASE EMPTY(lcName)
@@ -2184,16 +2450,6 @@ DEFINE CLASS DataConnections AS Custom
 		lnDs = SET("DATASESSION")
 		SET DATASESSION TO 1
 		lcKey = IIF(tlUpdatable, loDb.GetPrimaryKey(lcName), "")
-		*-- La cadena de la conexión viva (lleva PWD) y la misma sin él.
-		lcCs = SQLGETPROP(loDb.nHandle, "ConnectString")
-		lcNo = This.WithoutPassword(lcCs)
-		llPwd = !(lcNo == lcCs)
-		*-- La cadena con PWD no se escribe nunca en el .dbc: cada escritura de la
-		*-- conexión de un .dbc abierto va a un bloque nuevo del .DCT y el viejo se
-		*-- queda. Mientras se hace la vista, la conexión dice FILEDSN= de un .dsn
-		*-- temporal con la contraseña, que se borra al acabar.
-		lcDsn = ""
-		lcUse = lcCs
 		lcSql = ""
 		lcTypes = This.ColumnTypes(loDb, lcName)
 		lcList = This.CastList(loC.cEngine, loDb.nHandle, lcName)
@@ -2203,8 +2459,55 @@ DEFINE CLASS DataConnections AS Custom
 			lcSql = lcSql + IIF(lnI = 1, "", ", ") + This.ViewColumn(loC.cEngine, lcCol, lcTypes, lcList)
 		ENDFOR
 		lcSql = "SELECT " + lcSql + " FROM " + This.Quoted(loC.cEngine, lcName)
-		lcProbe = lcSql + " WHERE 1=0 AND (" + tcWhere + ")"
-		lcSql = lcSql + IIF(EMPTY(tcWhere), "", " WHERE " + tcWhere)
+		lcProbe = lcSql + " WHERE 1=0" + IIF(EMPTY(tcWhere), "", " AND (" + tcWhere + ")") + ;
+			IIF(EMPTY(tcOrder), "", " ORDER BY " + tcOrder)
+		lcSql = lcSql + IIF(EMPTY(tcWhere), "", " WHERE " + tcWhere) + IIF(EMPTY(tcOrder), "", " ORDER BY " + tcOrder)
+		SET DATASESSION TO (lnDs)
+		RETURN This.ViewInDbc(toF, loC, loDb, tcDbc, tcView, lcSql, ;
+			IIF(!(EMPTY(tcWhere) AND EMPTY(tcOrder)) AND !("?" $ tcWhere + tcOrder), lcProbe, ""), ;
+			tlReplace, lcKey, lcName, tcCols, lcJson, "", "", "")
+	ENDPROC
+
+	*-- La vista tcView en tcDbc (lo crea si no está) con la sentencia tcSql ya
+	*-- hecha, por la conexión viva toDb de toC: la conexión del .dbc sin la
+	*-- contraseña (un .dsn temporal mientras se hace), Reemplazar (tlReplace),
+	*-- deshacer si falla, DispLogin y el aviso de la ventana toF. Lo usan Create
+	*-- view... y la vista desde el SQL de Query.... tcProbe: la sentencia con la
+	*-- que se prueba antes de tocar el .dbc, o "". tcKey, tcName, tcCols y tcJson:
+	*-- para hacerla actualizable (tcKey vacío: de solo lectura). tcMore y
+	*-- tcMoreEn: lo que se añade al aviso (en el idioma de FoxDock y en inglés).
+	*-- tcTypes («campo:tipo,...»): los tipos de la consulta de la que sale (Query...).
+	*-- .T. si la hizo.
+	PROCEDURE ViewInDbc
+		LPARAMETERS toF, toC, toDb, tcDbc, tcView, tcSql, tcProbe, tlReplace, tcKey, tcName, tcCols, tcJson, tcMore, tcMoreEn, tcTypes
+		LOCAL loC, loDb, lcName, lcWhy, lcKey, lcCs, lcNo, lcConn, lcSql, lnI, lcCol, lnDs, lcOldDbc, llOpened, llMap, lcCmd, llBin
+		LOCAL loErr, lcErr, lnH, laF[1], lnN, lcField, llPwd, lnTry, lcMemo, llExists, llServer, llInUse, llReplaced, lcDsn, lcUse
+		LOCAL lcProbe, llProbe, laE[1], lcTypes, lcList, lcJson
+		loC = toC
+		loDb = toDb
+		lcSql = tcSql
+		lcProbe = tcProbe
+		lcKey = tcKey
+		lcName = tcName
+		lcJson = tcJson
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		*-- La cadena de la conexión viva (lleva PWD) y la misma sin él.
+		lcCs = SQLGETPROP(loDb.nHandle, "ConnectString")
+		*-- Tras un USE (UseOnSameConnection) la cadena sigue con la base con la que
+		*-- se conectó: la vista va a la de ahora.
+		IF INLIST(loC.cEngine, "sqlserver", "mysql", "mariadb") AND !EMPTY(loDb.cDatabase)
+			lcCs = This.WithDatabase(lcCs, loDb.cDatabase)
+		ENDIF
+		lcNo = This.WithoutPassword(lcCs)
+		llPwd = !(lcNo == lcCs)
+		*-- La cadena con PWD no se escribe nunca en el .dbc: cada escritura de la
+		*-- conexión de un .dbc abierto va a un bloque nuevo del .DCT y el viejo se
+		*-- queda. Mientras se hace la vista, la conexión dice FILEDSN= de un .dsn
+		*-- temporal con la contraseña, que se borra al acabar.
+		lcDsn = ""
+		lcUse = lcCs
+		lcSql = tcSql
 		llProbe = .F.
 		lcOldDbc = DBC()
 		llOpened = .F.
@@ -2214,12 +2517,13 @@ DEFINE CLASS DataConnections AS Custom
 		lcConn = ""
 		lcMemo = ""
 		TRY
-			*-- CREATE SQL VIEW no manda el WHERE al servidor: con una columna que no
-			*-- existe, la vista se haría y fallaría al abrirla. El SELECT con WHERE 1=0
-			*-- por la conexión de FoxRemote lo prueba antes, sin traer filas y en
-			*-- cualquier motor, y antes de tocar el .dbc: si falla, no hay nada que
-			*-- deshacer. Con un parámetro de vista (?x) no se prueba: SQLEXEC lo pediría.
-			IF !EMPTY(tcWhere) AND !("?" $ tcWhere)
+			*-- CREATE SQL VIEW no manda el WHERE ni el ORDER BY al servidor: con una
+			*-- columna que no existe, la vista se haría y fallaría al abrirla. El
+			*-- SELECT con WHERE 1=0 por la conexión de FoxRemote lo prueba antes, sin
+			*-- traer filas y en cualquier motor, y antes de tocar el .dbc: si falla, no
+			*-- hay nada que deshacer. Con un parámetro de vista (?x) no se prueba:
+			*-- SQLEXEC lo pediría.
+			IF !EMPTY(lcProbe)
 				TRY
 					IF SQLEXEC(loDb.nHandle, lcProbe, "fdviewprobe") < 0
 						=AERROR(laE)
@@ -2339,7 +2643,15 @@ DEFINE CLASS DataConnections AS Custom
 				lcErr = TRANSFORM(loErr.ErrorNo) + " " + loErr.Message
 			ENDTRY
 		ENDIF
-		IF EMPTY(lcErr)
+		IF EMPTY(lcErr) AND !EMPTY(tcTypes)
+			*-- Desde un SELECT libre: los tipos de sus campos, los de la consulta que se
+			*-- corrió, y abierta con una fila. En SQLite una columna calculada no tiene tipo:
+			*-- sin filas (NODATA) da el error 1543, y su DataType al crear la vista puede no
+			*-- ser el que llega.
+			lcErr = This.ViewTypes(tcView, tcTypes, loDb.nHandle)
+			llServer = !EMPTY(lcErr)
+		ENDIF
+		IF EMPTY(lcErr) AND EMPTY(tcTypes)
 			*-- Que el servidor la acepta: abierta sin datos, por la conexión de FoxRemote.
 			TRY
 				lnH = loDb.nHandle
@@ -2388,11 +2700,11 @@ DEFINE CLASS DataConnections AS Custom
 		This.ExploreSay(toF, This.T(IIF(llReplaced, "data.view.remade", "data.view.made"), tcView, This.T(IIF(EMPTY(lcKey), "data.view.readOnly", "data.view.isUpdatable")), ;
 			tcDbc, lcConn, This.T(IIF(llPwd, "data.view.withPassword", "data.view.noPassword")), ;
 			IIF(EMPTY(lcMemo), "", This.T(IIF(loC.cEngine == "mysql", "data.view.notUpdatableJson", "data.view.notUpdatable"), lcMemo)) + IIF(loC.cEngine == "sqlite", This.T("data.view.sqliteUtf8"), "") + ;
-			IIF(llPwd, This.T("data.view.askLogin", tcView), "")), ;
+			IIF(llPwd, This.T("data.view.askLogin", tcView), "") + tcMore), ;
 			This.E(IIF(llReplaced, "data.view.remade", "data.view.made"), tcView, This.E(IIF(EMPTY(lcKey), "data.view.readOnly", "data.view.isUpdatable")), ;
 			tcDbc, lcConn, This.E(IIF(llPwd, "data.view.withPassword", "data.view.noPassword")), ;
 			IIF(EMPTY(lcMemo), "", This.E(IIF(loC.cEngine == "mysql", "data.view.notUpdatableJson", "data.view.notUpdatable"), lcMemo)) + IIF(loC.cEngine == "sqlite", This.E("data.view.sqliteUtf8"), "") + ;
-			IIF(llPwd, This.E("data.view.askLogin", tcView), "")))
+			IIF(llPwd, This.E("data.view.askLogin", tcView), "") + tcMoreEn))
 		*-- La que abre Open.
 		IF PEMSTATUS(toF, "cmdOpen", 5)
 			toF.cMadeView = tcView
@@ -2401,6 +2713,125 @@ DEFINE CLASS DataConnections AS Custom
 			toF.cmdOpen.Enabled = .T.
 		ENDIF
 		RETURN .T.
+	ENDPROC
+
+	*-- Los tipos de los campos de un cursor de la sesión 1, «campo:tipo;...» con
+	*-- el tipo como lo toma DataType (C(20), N(10,2), I, M...).
+	PROCEDURE TypesOf
+		LPARAMETERS tcAlias
+		LOCAL lnDs, lnN, lnI, lcOut
+		LOCAL ARRAY laF[1]
+		lcOut = ""
+		lnDs = SET("DATASESSION")
+		SET DATASESSION TO 1
+		IF !EMPTY(tcAlias) AND USED(tcAlias)
+			lnN = AFIELDS(laF, tcAlias)
+			FOR lnI = 1 TO lnN
+				lcOut = lcOut + IIF(lnI = 1, "", ";") + LOWER(laF[lnI, 1]) + ":" + laF[lnI, 2] + ;
+					ICASE(INLIST(laF[lnI, 2], "C", "V", "Q"), "(" + TRANSFORM(laF[lnI, 3]) + ")", ;
+					laF[lnI, 2] == "N", "(" + TRANSFORM(laF[lnI, 3]) + "," + TRANSFORM(laF[lnI, 4]) + ")", "")
+			ENDFOR
+		ENDIF
+		SET DATASESSION TO (lnDs)
+		RETURN lcOut
+	ENDPROC
+
+	*-- Los campos de la vista tcView con los tipos tcTypes (TypesOf), y abierta
+	*-- con una fila (MaxRecords 1, que se deja como estaba) por la conexión tnH.
+	*-- "" si se abre; si no, el error.
+	PROCEDURE ViewTypes
+		LPARAMETERS tcView, tcTypes, tnH
+		LOCAL lnI, lcF, lcErr, loErr
+		lcErr = ""
+		TRY
+			FOR lnI = 1 TO GETWORDCOUNT(tcTypes, ";")
+				lcF = GETWORDNUM(tcTypes, lnI, ";")
+				TRY
+					=DBSETPROP(tcView + "." + LEFT(lcF, AT(":", lcF) - 1), "Field", "DataType", SUBSTR(lcF, AT(":", lcF) + 1))
+				CATCH TO loErr
+				ENDTRY
+			ENDFOR
+			=DBSETPROP(tcView, "View", "MaxRecords", 1)
+			USE (tcView) IN 0 ALIAS fdviewchk CONNSTRING tnH
+			USE IN fdviewchk
+		CATCH TO loErr
+			lcErr = TRANSFORM(loErr.ErrorNo) + " " + loErr.Message
+		ENDTRY
+		IF USED("fdviewchk")
+			USE IN fdviewchk
+		ENDIF
+		TRY
+			=DBSETPROP(tcView, "View", "MaxRecords", -1)
+		CATCH TO loErr
+		ENDTRY
+		RETURN lcErr
+	ENDPROC
+
+	*-- El botón Create view... de Query...: la ventana de Create view... en su
+	*-- modo «desde SQL», con la última sentencia que se corrió bien y lo que se
+	*-- sabe de ella (la envuelta con su CAST, sus tipos, lo que no llegó entero).
+	PROCEDURE ViewFromQuery
+		LPARAMETERS toQ
+		LOCAL loC, loSql
+		loC = This.Find(toQ.cConnId)
+		IF ISNULL(loC) OR EMPTY(toQ.cRanSql)
+			RETURN .NULL.
+		ENDIF
+		loSql = CREATEOBJECT("Empty")
+		ADDPROPERTY(loSql, "cSql", toQ.cRanSql)
+		ADDPROPERTY(loSql, "cWrap", toQ.cRanWrap)
+		ADDPROPERTY(loSql, "cTypes", toQ.cRanTypes)
+		ADDPROPERTY(loSql, "cShort", toQ.cRanShort)
+		ADDPROPERTY(loSql, "cShortEn", toQ.cRanShortEn)
+		RETURN This.ShowForm("DataViewForm", loC, loSql)
+	ENDPROC
+
+	*-- La vista desde el SQL de Query...: tcSql, la que se corrió bien (tcWrap, la
+	*-- envuelta con la que QueryWhole la leyó entera, si hizo falta). Siempre de
+	*-- solo lectura. VFP la toma en una línea de comando: un comentario «--» se
+	*-- comería lo de detrás y más de unos 8.100 caracteres no caben (error 18).
+	*-- Lo demás, como Create view... (ViewInDbc). .T. si la hizo.
+	PROCEDURE CreateViewFromSql
+		LPARAMETERS toF, tcDbc, tcView, tcSql, tcWrap, tlReplace, tcTypes, tcShort, tcShortEn
+		LOCAL loC, loDb, lcSql, lnMax, lcWhy
+		loC = This.Find(toF.cConnId)
+		tcView = LOWER(ALLTRIM(tcView))
+		tcDbc = ALLTRIM(tcDbc)
+		lcSql = ALLTRIM(CHRTRAN(EVL(tcWrap, tcSql), CHR(13) + CHR(10) + CHR(9), "   "))
+		DO WHILE RIGHT(lcSql, 1) == ";"
+			lcSql = ALLTRIM(LEFT(lcSql, LEN(lcSql) - 1))
+		ENDDO
+		lnMax = 8100 - LEN(tcView)
+		DO CASE
+			CASE ISNULL(loC)
+				lcWhy = "!" + This.cLastError
+			CASE EMPTY(tcView) OR !BETWEEN(LEFT(tcView, 1), "a", "z") OR ;
+					LEN(CHRTRAN(tcView, "abcdefghijklmnopqrstuvwxyz0123456789_", "")) > 0 OR LEN(tcView) > 128
+				lcWhy = "data.view.badName"
+			CASE !(LOWER(JUSTEXT(tcDbc)) == "dbc") OR !DIRECTORY(JUSTPATH(tcDbc), 1)
+				lcWhy = "data.view.badDbc"
+			CASE "--" $ lcSql
+				lcWhy = "data.view.sqlComment"
+			CASE LEN(lcSql) > lnMax
+				lcWhy = "data.view.tooLong"
+			OTHERWISE
+				lcWhy = ""
+		ENDCASE
+		IF !EMPTY(lcWhy)
+			DO CASE
+				CASE LEFT(lcWhy, 1) == "!"
+					This.ExploreSay(toF, SUBSTR(lcWhy, 2))
+				CASE lcWhy == "data.view.tooLong"
+					This.ExploreSayKey(toF, lcWhy, TRANSFORM(LEN(lcSql)), TRANSFORM(lnMax))
+				OTHERWISE
+					This.ExploreSayKey(toF, lcWhy, tcView)
+			ENDCASE
+			RETURN .F.
+		ENDIF
+		loDb = This.Live(loC.cId)
+		RETURN This.ViewInDbc(toF, loC, loDb, tcDbc, tcView, lcSql, "", tlReplace, "", "", "", "", ;
+			This.T("data.view.fromSqlReadOnly") + IIF(EMPTY(tcShort), "", " " + tcShort), ;
+			This.E("data.view.fromSqlReadOnly") + IIF(EMPTY(tcShortEn), "", " " + tcShortEn), tcTypes)
 	ENDPROC
 
 	*-- Open: lo que dicen las líneas de la ventana, hecho. En la sesión 1, la
@@ -2528,6 +2959,55 @@ DEFINE CLASS DataConnections AS Custom
 		RETURN lcOut
 	ENDPROC
 
+	*-- La cadena ODBC tcCs con DATABASE=tcDatabase: cambia la que traiga (con la
+	*-- clave en mayúsculas o no) o la pone al final. Un valor entre llaves, que
+	*-- puede llevar «;», se respeta; la base va entre llaves si lo necesita, como
+	*-- la escribe FoxRemote (Value).
+	PROCEDURE WithDatabase
+		LPARAMETERS tcCs, tcDatabase
+		LOCAL lcVal, lcOut, lcPart, lnI, lnLen, lcCh, llBrace, llDone
+		lcVal = tcDatabase
+		IF ";" $ lcVal OR "{" $ lcVal OR "}" $ lcVal OR "=" $ lcVal OR !(lcVal == ALLTRIM(lcVal))
+			lcVal = "{" + STRTRAN(lcVal, "}", "}}") + "}"
+		ENDIF
+		lcOut = ""
+		lcPart = ""
+		llBrace = .F.
+		llDone = .F.
+		lnLen = LEN(tcCs)
+		lnI = 1
+		DO WHILE lnI <= lnLen + 1
+			lcCh = IIF(lnI > lnLen, ";", SUBSTR(tcCs, lnI, 1))
+			DO CASE
+				CASE llBrace AND lcCh == "}" AND SUBSTR(tcCs, lnI + 1, 1) == "}"
+					lcPart = lcPart + "}}"
+					lnI = lnI + 1
+				CASE llBrace AND lcCh == "}"
+					lcPart = lcPart + lcCh
+					llBrace = .F.
+				CASE !llBrace AND lcCh == "{"
+					lcPart = lcPart + lcCh
+					llBrace = .T.
+				CASE !llBrace AND lcCh == ";"
+					IF !EMPTY(lcPart)
+						IF UPPER(ALLTRIM(LEFT(lcPart, AT("=", lcPart + "=") - 1))) == "DATABASE"
+							lcPart = "DATABASE=" + lcVal
+							llDone = .T.
+						ENDIF
+						lcOut = lcOut + lcPart + ";"
+					ENDIF
+					lcPart = ""
+				OTHERWISE
+					lcPart = lcPart + lcCh
+			ENDCASE
+			lnI = lnI + 1
+		ENDDO
+		IF !llDone
+			lcOut = lcOut + "DATABASE=" + lcVal + ";"
+		ENDIF
+		RETURN lcOut
+	ENDPROC
+
 	*-- Una cadena ODBC sin PWD= ni PASSWORD= (las partes separadas por «;»).
 	PROCEDURE WithoutPassword
 		LPARAMETERS tcCs
@@ -2567,6 +3047,27 @@ DEFINE CLASS DataConnections AS Custom
 			RETURN .NULL.
 		ENDIF
 		RETURN This.ShowForm("DataScriptForm", loC, lcName)
+	ENDPROC
+
+	*-- Query... de Explore...: la ventana de Query... de la conexión, con un
+	*-- SELECT de tcName para empezar (QuerySql).
+	PROCEDURE ExploreQuery
+		LPARAMETERS toF, tcName
+		LOCAL loC, lcName
+		loC = This.Find(toF.cConnId)
+		lcName = This.ObjectName(toF.cConnId, tcName)
+		IF EMPTY(lcName)
+			This.ExploreSay(toF, This.cLastError)
+			RETURN .NULL.
+		ENDIF
+		RETURN This.ShowForm("DataQueryForm", loC, This.QuerySql(loC.cEngine, lcName))
+	ENDPROC
+
+	*-- El SELECT con el que empieza Query... desde Explore...: todas las columnas
+	*-- de tcName y un WHERE que no quita nada, para escribir detrás.
+	PROCEDURE QuerySql
+		LPARAMETERS tcEngine, tcName
+		RETURN "SELECT *" + CRLF + "FROM " + This.Quoted(tcEngine, tcName) + CRLF + "WHERE 1 = 1"
 	ENDPROC
 
 	*-- El script de la ventanita toF: tcKind create, insert o update; tcDialect,
@@ -2981,7 +3482,8 @@ DEFINE CLASS DataConnections AS Custom
 	PROCEDURE QueryBar
 		LPARAMETERS tcId
 		LOCAL loC
-		IF !This.BarReady(tcId)
+		tcId = This.BarConn(tcId)
+		IF EMPTY(tcId) OR !This.BarReady(tcId)
 			RETURN .F.
 		ENDIF
 		loC = This.Find(tcId)
@@ -3638,6 +4140,8 @@ DEFINE CLASS DataSqlGuard AS Custom
 	cSql = ""
 	cEngine = ""      && el motor, para decir con qué comillas se reescribe
 	cStatement = ""   && la palabra con la que empieza la sentencia que pasa CheckWrite
+	cCode = ""        && por qué no pasa CheckWrite: empty, many, read, first, word o whole
+	cWord = ""        && la palabra de ese motivo (la primera, la que sobra o la de la tabla entera)
 	cWords = "INSERT UPDATE DELETE DROP ALTER CREATE TRUNCATE MERGE UPSERT EXEC EXECUTE CALL GRANT REVOKE " + ;
 		"INTO ATTACH DETACH PRAGMA VACUUM COPY LOCK REINDEX RENAME SET DECLARE BEGIN COMMIT ROLLBACK"
 	*-- Lo que no va en una escritura, en ningún sitio de ella (SET, INTO,
@@ -3657,7 +4161,10 @@ DEFINE CLASS DataSqlGuard AS Custom
 		lcSql = ALLTRIM(TRANSFORM(tcSql), 1, " ", CHR(9), CHR(13), CHR(10))
 		This.cSql = ""
 		This.cStatement = ""
+		This.cCode = ""
+		This.cWord = ""
 		IF EMPTY(lcSql)
+			This.cCode = "empty"
 			RETURN "the statement is empty"
 		ENDIF
 		lcCode = This.Code(lcSql)
@@ -3667,23 +4174,32 @@ DEFINE CLASS DataSqlGuard AS Custom
 			lcSql = LEFT(lcSql, lnLast - 1)
 		ENDIF
 		IF ";" $ lcCode
+			This.cCode = "many"
 			RETURN "it has more than one statement (a ';' with something after it): ide_data_db_execute runs one at a time"
 		ENDIF
 		lcUp = " " + UPPER(CHRTRAN(lcCode, "(),.;=<>+-*/%!|&^~:@#$?{}", SPACE(30))) + " "
 		lcFirst = GETWORDNUM(lcUp, 1)
+		This.cWord = lcFirst
 		DO CASE
 			CASE INLIST(lcFirst, "SELECT", "WITH")
+				This.cCode = "read"
 				RETURN "it is a " + lcFirst + ": reading goes through ide_data_db_query"
 			CASE !INLIST(lcFirst, "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE")
+				This.cCode = "first"
 				RETURN "it starts with " + IIF(EMPTY(lcFirst), "nothing", "'" + lcFirst + "'") + ;
 					": ide_data_db_execute runs one INSERT, UPDATE, DELETE, CREATE, ALTER, DROP or TRUNCATE"
 		ENDCASE
 		FOR lnW = 1 TO ALINES(laW, STRTRAN(This.cWriteWords, " ", CHR(13)), 1 + 4)
 			lcW = laW[lnW]
 			IF " " + lcW + " " $ lcUp
+				This.cCode = "word"
+				This.cWord = lcW
 				RETURN "it has " + lcW + " in it" + This.Rewrite(lcW, lcUp)
 			ENDIF
 		ENDFOR
+		IF !tlWholeTable AND (INLIST(lcFirst, "TRUNCATE", "DROP") OR INLIST(lcFirst, "UPDATE", "DELETE") AND !(" WHERE " $ lcUp))
+			This.cCode = "whole"
+		ENDIF
 		IF !tlWholeTable
 			DO CASE
 				CASE lcFirst == "UPDATE" AND !(" WHERE " $ lcUp)
@@ -3697,8 +4213,18 @@ DEFINE CLASS DataSqlGuard AS Custom
 			ENDCASE
 		ENDIF
 		This.cStatement = lcFirst
+		This.cWord = ""
 		This.cSql = ALLTRIM(lcSql, 1, " ", CHR(9), CHR(13), CHR(10))
 		RETURN ""
+	ENDPROC
+
+	*-- La primera palabra de tcSql, en mayúsculas, sin contar comentarios ni
+	*-- literales (Code): SELECT, UPDATE...; "" si no hay ninguna.
+	PROCEDURE FirstWord
+		LPARAMETERS tcSql
+		LOCAL lcCode
+		lcCode = This.Code(ALLTRIM(TRANSFORM(tcSql), 1, " ", CHR(9), CHR(13), CHR(10)))
+		RETURN GETWORDNUM(UPPER(CHRTRAN(lcCode, "(),.;=<>+-*/%!|&^~:@#$?{}" + CHR(9) + CHR(13) + CHR(10), SPACE(28))), 1)
 	ENDPROC
 
 	PROCEDURE Check
@@ -3839,18 +4365,225 @@ DEFINE CLASS DataConnectionForm AS Form
 	cKind = ""        && explore, query, view, export o connect
 	cTitleEn = ""     && su nombre en el log («Explore...», «Query...»)
 	cCursors = ""     && los cursores que abrió, separados por comas
+	DIMENSION aConnIds[1]  && el id de cada línea de cboConn (Explore... y Query...)
+	*-- Lo que pasó en cboConn desde que se abrió su lista o desde su último Valid,
+	*-- para saber si una elección está confirmada (ConnClick).
+	lConnDropped = .F.  && la lista está abierta: DropDown; la cierran Valid, Esc, F4 y Alt+flecha
+	nConnKey = 0        && la última tecla, si un InteractiveChange no se la llevó
+	lConnByKey = .F.    && el último InteractiveChange vino de una tecla
+	lConnRefill = .F.   && FillConns quedó para cuando se cierre la lista
+	nConnRebuilt = 0    && las veces que FillConns vació y rellenó el combo
 
 	PROCEDURE Init
 		LPARAMETERS toModule, toC
 		This.oModule = toModule
+		This.cKind = STRTRAN(STRTRAN(LOWER(This.Class), "data", "", 1, 1), "form", "")
+		This.SetConn(toC)
+	ENDPROC
+
+	*-- La conexión de la ventana: su id, su nombre y el Name. Un Name por ventana
+	*-- y conexión (FoxDockExplore_shop): las tools de FoxAgent con formName eligen
+	*-- la que no está delante. Con el de la clase, dos Explore se llamarían igual.
+	PROCEDURE SetConn
+		LPARAMETERS toC
 		This.cConnId = toC.cId
 		This.cConnName = toC.cName
-		*-- Un Name por ventana y conexión (FoxDockExplore_shop): las tools de
-		*-- FoxAgent con formName eligen la que no está delante. Con el de la clase,
-		*-- dos Explore se llamarían igual.
-		This.cKind = STRTRAN(STRTRAN(LOWER(This.Class), "data", "", 1, 1), "form", "")
 		This.Name = "FoxDock" + PROPER(This.cKind) + "_" + ;
 			CHRTRAN(toC.cId, CHRTRAN(LOWER(toC.cId), "abcdefghijklmnopqrstuvwxyz0123456789_", ""), REPLICATE("_", 64))
+	ENDPROC
+
+	*-- cboConn: todas las conexiones en el orden de la lista, con su nombre, su
+	*-- motor y la marca de no conectada; elegida, la de la ventana (ninguna si ya
+	*-- no está en la lista). Sin cboConn, nada. Lo llaman Texts (también cada vez
+	*-- que se rehace el menú) y RefillConns (al conectar, desconectar y recargar), así
+	*-- que no toca el combo si lo que pondría es lo que ya tiene, y nunca con su
+	*-- lista abierta: vaciarla debajo de la lista hace caer a VFP. Entonces lo deja
+	*-- para cuando se cierre (lConnRefill, ConnLater).
+	PROCEDURE FillConns
+		LOCAL loM, loC, lnI, lnOwn, lnN
+		LOCAL ARRAY laText[1], laId[1]
+		IF !PEMSTATUS(This, "cboConn", 5) OR VARTYPE(This.oModule) # "O"
+			RETURN
+		ENDIF
+		IF This.lConnDropped
+			This.lConnRefill = .T.
+			RETURN
+		ENDIF
+		This.lConnRefill = .F.
+		loM = This.oModule
+		lnN = loM.oList.Count
+		DIMENSION laText[MAX(lnN, 1)], laId[MAX(lnN, 1)]
+		STORE "" TO laText, laId
+		lnI = 0
+		lnOwn = 0
+		FOR EACH loC IN loM.oList FOXOBJECT
+			lnI = lnI + 1
+			laText[lnI] = loM.MenuName(loC) + " (" + loC.cEngine + ")" + IIF(loM.IsConnected(loC.cId), "", loM.T("data.conn.notConnectedMark"))
+			laId[lnI] = loC.cId
+			IF loC.cId == This.cConnId
+				lnOwn = lnI
+			ENDIF
+		ENDFOR
+		IF !This.SameConns(@laText, lnN)
+			This.nConnRebuilt = This.nConnRebuilt + 1
+			This.cboConn.Clear()
+			FOR lnI = 1 TO lnN
+				This.cboConn.AddItem(laText[lnI])
+			ENDFOR
+		ENDIF
+		DIMENSION This.aConnIds[MAX(lnN, 1)]
+		This.aConnIds[1] = ""
+		FOR lnI = 1 TO lnN
+			This.aConnIds[lnI] = laId[lnI]
+		ENDFOR
+		IF This.cboConn.ListIndex # lnOwn
+			This.cboConn.ListIndex = lnOwn
+		ENDIF
+	ENDPROC
+
+	*-- .T. si cboConn ya tiene esas tnN líneas, en ese orden.
+	PROCEDURE SameConns
+		LPARAMETERS taText, tnN
+		LOCAL lnI
+		IF This.cboConn.ListCount # tnN
+			RETURN .F.
+		ENDIF
+		FOR lnI = 1 TO tnN
+			IF !(This.cboConn.List(lnI) == taText[lnI])
+				RETURN .F.
+			ENDIF
+		ENDFOR
+		RETURN .T.
+	ENDPROC
+
+	*-- La lista ya está cerrada: lo que FillConns dejó para entonces. Una elección
+	*-- sin confirmar se queda elegida, si la conexión sigue en la lista.
+	PROCEDURE ConnLater
+		LOCAL lcPick, lnI
+		This.lConnDropped = .F.
+		IF !This.lConnRefill
+			RETURN
+		ENDIF
+		lcPick = This.ConnPicked()
+		This.FillConns()
+		IF !EMPTY(lcPick) AND !(lcPick == This.cConnId)
+			FOR lnI = 1 TO ALEN(This.aConnIds)
+				IF This.aConnIds[lnI] == lcPick
+					This.cboConn.ListIndex = lnI
+				ENDIF
+			ENDFOR
+		ENDIF
+	ENDPROC
+
+	*-- cboConn: una elección cuenta cuando se confirma como en cualquier lista de
+	*-- Windows, con Enter o con el clic en una línea de la lista abierta. Pasar por
+	*-- encima no cuenta: flechas, Inicio, Fin, letras y rueda, con la lista cerrada
+	*-- o abierta, aunque con la lista cerrada VFP salte Click y Valid en cada flecha.
+	*-- Tampoco cuenta el clic fuera de la lista abierta, en otro control o en la X de
+	*-- la ventana: VFP salta Valid sin Click. Lo que no cuenta se queda en el combo
+	*-- como elección pendiente (ConnPending) hasta que se confirma, o hasta que Run o
+	*-- un botón la resuelven (ConnSettled); cerrar la ventana la olvida. Sus eventos,
+	*-- en este orden: DropDown al abrirse la lista, KeyPress en cada tecla,
+	*-- InteractiveChange en cada cambio, Click y Valid. Se decide en Click, y Valid
+	*-- no lleva código: con la lista abierta, el clic en la X salta Valid, y en ese
+	*-- Valid basta leer ListIndex o llamar a un método del formulario para que VFP
+	*-- caiga.
+	PROCEDURE ConnDropDown
+		This.ConnReset()
+		This.lConnDropped = .T.
+	ENDPROC
+
+	PROCEDURE ConnKey
+		LPARAMETERS tnKey, tnShift
+		LOCAL llWas
+		This.nConnKey = tnKey
+		llWas = This.lConnDropped
+		*-- Esc, F4 y Alt+flecha cierran la lista abierta; F4 y Alt+flecha también la
+		*-- abren, y entonces DropDown la vuelve a marcar.
+		IF tnKey = 27 OR tnKey = -3 OR BITAND(tnShift, 4) # 0
+			This.ConnLater()
+		ENDIF
+		*-- Esc con la lista abierta deja lo que había: el combo vuelve a la conexión
+		*-- de la ventana, y nada queda pendiente.
+		IF tnKey = 27 AND llWas AND This.ConnPending()
+			This.FillConns()
+		ENDIF
+	ENDPROC
+
+	PROCEDURE ConnChange
+		This.lConnByKey = This.nConnKey # 0 AND This.nConnKey # 13
+		This.nConnKey = 0
+	ENDPROC
+
+	*-- Click: una elección confirmada (Enter, o el clic en una línea con la lista
+	*-- abierta) cuenta en el acto (ConnUse); una flecha con la lista cerrada salta
+	*-- Click detrás de su InteractiveChange, y no cuenta. El selector vuelve a empezar.
+	PROCEDURE ConnClick
+		LOCAL llOk, lcTalk
+		llOk = This.nConnKey = 13 OR (This.lConnDropped AND This.nConnKey = 0 AND !This.lConnByKey)
+		This.ConnReset()
+		IF llOk AND This.ConnPending()
+			lcTalk = SET("TALK")
+			SET TALK OFF
+			=This.ConnUse(This.ConnPicked())
+			SET TALK &lcTalk
+		ENDIF
+		This.ConnLater()
+	ENDPROC
+
+	*-- Lo que hace una elección confirmada; cada ventana pone el suyo.
+	PROCEDURE ConnUse
+		LPARAMETERS tcId
+		RETURN .F.
+	ENDPROC
+
+	PROCEDURE ConnReset
+		STORE .F. TO This.lConnDropped, This.lConnByKey
+		This.nConnKey = 0
+	ENDPROC
+
+	*-- .T. si el combo enseña otra conexión que la de la ventana: una elección que
+	*-- no se ha confirmado.
+	PROCEDURE ConnPending
+		LOCAL lcId
+		IF !PEMSTATUS(This, "cboConn", 5)
+			RETURN .F.
+		ENDIF
+		lcId = This.ConnPicked()
+		RETURN !EMPTY(lcId) AND !(lcId == This.cConnId)
+	ENDPROC
+
+	*-- El nombre de la conexión tcId, o su id si ya no está en la lista.
+	PROCEDURE ConnNameOf
+		LPARAMETERS tcId
+		LOCAL loC
+		loC = This.oModule.Find(tcId)
+		RETURN IIF(ISNULL(loC), tcId, loC.cName)
+	ENDPROC
+
+	*-- El id de la conexión elegida en cboConn, o "".
+	PROCEDURE ConnPicked
+		LOCAL lnI
+		lnI = This.cboConn.ListIndex
+		RETURN IIF(lnI > 0 AND lnI <= ALEN(This.aConnIds), This.aConnIds[lnI], "")
+	ENDPROC
+
+	*-- Al cambiar de conexión, los cursores de la de antes, como al cerrarse: se
+	*-- cierran, salvo con «Keep the cursors open» marcado, y entonces dejan de ser
+	*-- de esta ventana.
+	PROCEDURE CursorsOfBefore
+		LOCAL loM
+		loM = This.oModule
+		DO CASE
+			CASE EMPTY(This.cCursors)
+			CASE PEMSTATUS(This, "chkKeep", 5) AND This.chkKeep.Value
+				loM.oHost.NotifyKey("data.cursors.kept", This.cConnName, STRTRAN(This.cCursors, ",", ", "))
+				This.cCursors = ""
+			OTHERWISE
+				loM.oHost.Log("data.connections: " + This.cTitleEn + " of '" + This.cConnId + "' closed its cursors: " + ;
+					STRTRAN(This.cCursors, ",", ", "))
+				This.CloseCursors()
+		ENDCASE
 	ENDPROC
 
 	PROCEDURE Destroy
@@ -3966,6 +4699,7 @@ ENDDEFINE
 DEFINE CLASS DataConnectForm AS DataConnectionForm
 	Width = 420
 	Height = 190
+	lMakeCurrent = .F.   && abierta desde Connect...: si conecta, es la actual
 
 	ADD OBJECT lblWhere AS Label WITH Left = 10, Top = 12, Width = 400, Height = 34, WordWrap = .T.
 	ADD OBJECT lblPassword AS Label WITH Caption = "\<Password", Left = 10, Top = 58, AutoSize = .T.
@@ -4017,6 +4751,9 @@ DEFINE CLASS DataConnectForm AS DataConnectionForm
 		llOk = loM.Connect(lcId, RTRIM(Thisform.txtPassword.Value), Thisform.chkRemember.Value)
 		Thisform.txtPassword.Value = ""
 		IF llOk
+			IF Thisform.lMakeCurrent
+				loM.SetCurrent(lcId)
+			ENDIF
 			loM.oHost.NotifyKey("data.conn.connected", Thisform.cConnName)
 			Thisform.Release()
 		ELSE
@@ -4048,15 +4785,15 @@ ENDDEFINE
 *-- lado filtra tablas, vistas o las dos. Se estira (BorderStyle 3,
 *-- maximizar) con la lista; las filas de botones y el cuadro de abajo se
 *-- quedan pegados abajo. Script as..., al lado de Create view...; la casilla
-*-- de los cursores, en su fila.
+*-- de los cursores, en su fila. Query..., al final de la fila de Export...
 DEFINE CLASS DataExploreForm AS DataConnectionForm
 	lFirstLoad = .T.  && la primera carga de la lista pone el combo en «Tablas»
 	Width = 520
-	Height = 522
+	Height = 554
 	BorderStyle = 3
 	MaxButton = .T.
 	MinWidth = 520
-	MinHeight = 522
+	MinHeight = 554
 	cEngine = ""
 	cTitleEn = "Explore..."
 	nTotal = 0        && las tablas y vistas de la base, sin filtro
@@ -4064,37 +4801,45 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 	nOfKind = 0       && volver a decir la cuenta en otro idioma (-1: sin contar aún)
 	DIMENSION aObjects[1, 2]
 
-	ADD OBJECT lblDatabase AS Label WITH Caption = "\<Database", Left = 10, Top = 14, AutoSize = .T.
-	ADD OBJECT cboDatabase AS ComboBox WITH Left = 80, Top = 10, Width = 430, Height = 24, Style = 2, Anchor = 11
-	ADD OBJECT lblFilter AS Label WITH Caption = "\<Filter", Left = 10, Top = 46, AutoSize = .T.
-	ADD OBJECT txtFilter AS TextBox WITH Left = 80, Top = 42, Width = 250, Height = 24, Value = ""
+	*-- El orden de tabulación empieza por el filtro (D36g): lo que se teclea al abrir
+	*-- la ventana va ahí, como antes del selector. La conexión y la base van detrás,
+	*-- arriba en la ventana; cada etiqueta, justo delante de su control.
+	ADD OBJECT lblFilter AS Label WITH Caption = "\<Filter", Left = 10, Top = 78, AutoSize = .T.
+	ADD OBJECT txtFilter AS TextBox WITH Left = 80, Top = 74, Width = 250, Height = 24, Value = ""
+	*-- La conexión de la ventana: elegir otra abre o trae su Explore... (GoToConn).
+	ADD OBJECT lblConn AS Label WITH Caption = "Connection", Left = 10, Top = 14, AutoSize = .T.
+	ADD OBJECT cboConn AS ComboBox WITH Left = 80, Top = 10, Width = 430, Height = 24, Style = 2, Anchor = 11
+	ADD OBJECT lblDatabase AS Label WITH Caption = "\<Database", Left = 10, Top = 46, AutoSize = .T.
+	ADD OBJECT cboDatabase AS ComboBox WITH Left = 80, Top = 42, Width = 430, Height = 24, Style = 2, Anchor = 11
 	*-- Tablas, vistas o las dos; la cuenta, debajo, dice las que pasan los dos filtros.
-	ADD OBJECT cboKind AS ComboBox WITH Left = 338, Top = 42, Width = 172, Height = 24, Style = 2, Anchor = 9
-	ADD OBJECT lblCount AS Label WITH Caption = "", Left = 80, Top = 72, Width = 430, Height = 18, Anchor = 11
-	ADD OBJECT lstObjects AS ListBox WITH Left = 10, Top = 94, Width = 500, Height = 210, ColumnCount = 2, ;
+	ADD OBJECT cboKind AS ComboBox WITH Left = 338, Top = 74, Width = 172, Height = 24, Style = 2, Anchor = 9
+	ADD OBJECT lblCount AS Label WITH Caption = "", Left = 80, Top = 104, Width = 430, Height = 18, Anchor = 11
+	ADD OBJECT lstObjects AS ListBox WITH Left = 10, Top = 126, Width = 500, Height = 210, ColumnCount = 2, ;
 		ColumnWidths = "400,70", Anchor = 15
-	ADD OBJECT cmdColumns AS CommandButton WITH Caption = "\<Columns", Left = 10, Top = 312, Width = 90, Height = 28, Anchor = 6
-	ADD OBJECT cmdBrowse AS CommandButton WITH Caption = "\<Browse", Left = 110, Top = 312, Width = 90, Height = 28, Anchor = 6
-	ADD OBJECT lblLimit AS Label WITH Caption = "\<Limit", Left = 214, Top = 318, AutoSize = .T., Anchor = 6
-	ADD OBJECT spnLimit AS Spinner WITH Left = 250, Top = 314, Width = 80, Height = 24, Value = 100, ;
+	ADD OBJECT cmdColumns AS CommandButton WITH Caption = "\<Columns", Left = 10, Top = 344, Width = 90, Height = 28, Anchor = 6
+	ADD OBJECT cmdBrowse AS CommandButton WITH Caption = "\<Browse", Left = 110, Top = 344, Width = 90, Height = 28, Anchor = 6
+	ADD OBJECT lblLimit AS Label WITH Caption = "\<Limit", Left = 214, Top = 350, AutoSize = .T., Anchor = 6
+	ADD OBJECT spnLimit AS Spinner WITH Left = 250, Top = 346, Width = 80, Height = 24, Value = 100, ;
 		SpinnerLowValue = 0, SpinnerHighValue = 1000000, KeyboardLowValue = 0, KeyboardHighValue = 1000000, Increment = 100, ;
 		Anchor = 6
-	ADD OBJECT lblNoLimit AS Label WITH Caption = "rows (0 = no limit)", Left = 336, Top = 318, AutoSize = .T., Anchor = 6
-	ADD OBJECT cmdExport AS CommandButton WITH Caption = "E\<xport...", Left = 10, Top = 346, Width = 90, Height = 28, Anchor = 6
-	ADD OBJECT cmdView AS CommandButton WITH Caption = "Create \<view...", Left = 110, Top = 346, Width = 100, Height = 28, ;
+	ADD OBJECT lblNoLimit AS Label WITH Caption = "rows (0 = no limit)", Left = 336, Top = 350, AutoSize = .T., Anchor = 6
+	ADD OBJECT cmdExport AS CommandButton WITH Caption = "E\<xport...", Left = 10, Top = 378, Width = 90, Height = 28, Anchor = 6
+	ADD OBJECT cmdView AS CommandButton WITH Caption = "Create \<view...", Left = 110, Top = 378, Width = 100, Height = 28, ;
 		Anchor = 6
-	ADD OBJECT cmdScript AS CommandButton WITH Caption = "Script as...", Left = 220, Top = 346, Width = 100, Height = 28, ;
+	ADD OBJECT cmdScript AS CommandButton WITH Caption = "Script as...", Left = 220, Top = 378, Width = 100, Height = 28, ;
 		Anchor = 6
 	*-- To object: las filas de la elegida a una Collection PUBLIC, con el nombre de abajo.
-	ADD OBJECT cmdObject AS CommandButton WITH Caption = "To \<object", Left = 330, Top = 346, Width = 90, Height = 28, Anchor = 6
-	ADD OBJECT lblObject AS Label WITH Caption = "Variable", Left = 300, Top = 384, AutoSize = .T., Anchor = 6
-	ADD OBJECT txtObject AS TextBox WITH Left = 360, Top = 380, Width = 150, Height = 24, Value = "", MaxLength = 128, Anchor = 6
-	ADD OBJECT chkKeep AS CheckBox WITH Caption = "Keep the cursors open when it closes", Left = 10, Top = 382, ;
+	ADD OBJECT cmdObject AS CommandButton WITH Caption = "To \<object", Left = 330, Top = 378, Width = 90, Height = 28, Anchor = 6
+	*-- Query...: la ventana de Query... con un SELECT de la elegida.
+	ADD OBJECT cmdQuery AS CommandButton WITH Caption = "\<Query...", Left = 430, Top = 378, Width = 80, Height = 28, Anchor = 6
+	ADD OBJECT lblObject AS Label WITH Caption = "Variable", Left = 300, Top = 416, AutoSize = .T., Anchor = 6
+	ADD OBJECT txtObject AS TextBox WITH Left = 360, Top = 412, Width = 150, Height = 24, Value = "", MaxLength = 128, Anchor = 6
+	ADD OBJECT chkKeep AS CheckBox WITH Caption = "Keep the cursors open when it closes", Left = 10, Top = 414, ;
 		AutoSize = .T., Value = .F., Anchor = 6
-	ADD OBJECT edtSay AS EditBox WITH Left = 10, Top = 404, Width = 500, Height = 74, ReadOnly = .T., ScrollBars = 2, ;
+	ADD OBJECT edtSay AS EditBox WITH Left = 10, Top = 436, Width = 500, Height = 74, ReadOnly = .T., ScrollBars = 2, ;
 		Value = "", Anchor = 14
-	ADD OBJECT cmdHelp AS CommandButton WITH Caption = "\<Help", Left = 10, Top = 486, Width = 90, Height = 28, Anchor = 6
-	ADD OBJECT cmdClose AS CommandButton WITH Caption = "Close", Left = 420, Top = 486, Width = 90, Height = 28, Cancel = .T., ;
+	ADD OBJECT cmdHelp AS CommandButton WITH Caption = "\<Help", Left = 10, Top = 518, Width = 90, Height = 28, Anchor = 6
+	ADD OBJECT cmdClose AS CommandButton WITH Caption = "Close", Left = 420, Top = 518, Width = 90, Height = 28, Cancel = .T., ;
 		Anchor = 12
 
 	PROCEDURE Init
@@ -4215,6 +4960,7 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		This.cmdExport.Caption = loM.T("data.explore.export")
 		This.cmdView.Caption = loM.T("data.explore.view")
 		This.cmdScript.Caption = loM.T("data.explore.script")
+		This.cmdQuery.Caption = loM.T("data.explore.query")
 		This.cmdObject.Caption = loM.T("data.object.button")
 		This.lblObject.Caption = loM.T("data.object.name")
 		This.AfterLabel(This.lblObject, This.txtObject)
@@ -4231,6 +4977,9 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		FOR lnI = 1 TO This.lstObjects.ListCount
 			This.lstObjects.List(lnI, 2) = This.KindText(This.KindOf(This.lstObjects.List(lnI, 1)))
 		ENDFOR
+		This.lblConn.Caption = This.oModule.T("data.conn.label")
+		This.AfterLabel(This.lblConn, This.cboConn)
+		This.FillConns()
 	ENDPROC
 
 	*-- El tipo de la segunda columna, en el idioma de FoxDock; lo que no es
@@ -4393,6 +5142,10 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		LOCAL lcTalk, lcName
 		lcTalk = SET("TALK")
 		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		lcName = Thisform.Chosen()
 		IF EMPTY(lcName)
 			Thisform.oModule.ExploreSayKey(Thisform, "data.explore.chooseFirst")
@@ -4407,6 +5160,10 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		LOCAL lcTalk, lcName, lnLimit
 		lcTalk = SET("TALK")
 		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		lcName = Thisform.Chosen()
 		lnLimit = MAX(INT(Thisform.spnLimit.Value), 0)
 		IF EMPTY(lcName)
@@ -4424,6 +5181,10 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		LOCAL lcTalk, lcName, lnLimit
 		lcTalk = SET("TALK")
 		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		lcName = Thisform.Chosen()
 		lnLimit = MAX(INT(Thisform.spnLimit.Value), 0)
 		Thisform.oModule.SaveQueryLimit(lnLimit)
@@ -4439,6 +5200,10 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		LOCAL lcTalk, lcName
 		lcTalk = SET("TALK")
 		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		lcName = Thisform.Chosen()
 		IF EMPTY(lcName)
 			Thisform.oModule.ExploreSayKey(Thisform, "data.explore.chooseFirst")
@@ -4452,6 +5217,10 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		LOCAL lcTalk, lcName
 		lcTalk = SET("TALK")
 		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		lcName = Thisform.Chosen()
 		IF EMPTY(lcName)
 			Thisform.oModule.ExploreSayKey(Thisform, "data.explore.chooseFirst")
@@ -4465,11 +5234,32 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 		LOCAL lcTalk, lcName
 		lcTalk = SET("TALK")
 		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		lcName = Thisform.Chosen()
 		IF EMPTY(lcName)
 			Thisform.oModule.ExploreSayKey(Thisform, "data.explore.chooseFirst")
 		ELSE
 			=Thisform.oModule.ScriptBar(Thisform, lcName)
+		ENDIF
+		SET TALK &lcTalk
+	ENDPROC
+
+	PROCEDURE cmdQuery.Click
+		LOCAL lcTalk, lcName
+		lcTalk = SET("TALK")
+		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
+		lcName = Thisform.Chosen()
+		IF EMPTY(lcName)
+			Thisform.oModule.ExploreSayKey(Thisform, "data.explore.chooseFirst")
+		ELSE
+			=Thisform.oModule.ExploreQuery(Thisform, lcName)
 		ENDIF
 		SET TALK &lcTalk
 	ENDPROC
@@ -4480,6 +5270,72 @@ DEFINE CLASS DataExploreForm AS DataConnectionForm
 
 	PROCEDURE cmdHelp.Click
 		=ThisForm.ShowHelp()
+	ENDPROC
+
+	*-- Sin código, como en Query...: la elección se decide en Click.
+	PROCEDURE cboConn.Valid
+		RETURN .T.
+	ENDPROC
+
+	PROCEDURE ConnUse
+		LPARAMETERS tcId
+		RETURN This.GoToConn(tcId)
+	ENDPROC
+
+	PROCEDURE cboConn.DropDown
+		Thisform.ConnDropDown()
+	ENDPROC
+
+	PROCEDURE cboConn.KeyPress
+		LPARAMETERS nKeyCode, nShiftAltCtrl
+		Thisform.ConnKey(nKeyCode, nShiftAltCtrl)
+	ENDPROC
+
+	PROCEDURE cboConn.InteractiveChange
+		Thisform.ConnChange()
+	ENDPROC
+
+	PROCEDURE cboConn.Click
+		Thisform.ConnClick()
+	ENDPROC
+
+	*-- Antes de cada botón: con una elección pendiente en el combo, el botón no
+	*-- actúa en esta ventana. Se va a la elegida (GoToConn), o, si no queda lista,
+	*-- el combo vuelve a la de la ventana y edtSay dice por qué. .T. si no había
+	*-- ninguna pendiente.
+	PROCEDURE ConnSettled
+		LOCAL lcId, loM
+		This.ConnLater()
+		IF !This.ConnPending()
+			RETURN .T.
+		ENDIF
+		lcId = This.ConnPicked()
+		IF !This.GoToConn(lcId)
+			loM = This.oModule
+			loM.ExploreSayKey(This, "data.explore.notMoved", This.ConnNameOf(lcId), This.cConnName, loM.cLastError)
+		ENDIF
+		RETURN .F.
+	ENDPROC
+
+	*-- Otra conexión: Explore... es una ventana por conexión, así que se abre la
+	*-- de esa (o se trae delante, ExploreBar) y es la conexión actual; esta se
+	*-- queda como estaba y su combo vuelve a la suya. Si la otra no está lista, no
+	*-- se abre nada y edtSay dice por qué. .T. si la otra quedó abierta.
+	PROCEDURE GoToConn
+		LPARAMETERS tcId
+		LOCAL loM, loF
+		loM = This.oModule
+		This.FillConns()
+		IF EMPTY(tcId) OR tcId == This.cConnId
+			RETURN .F.
+		ENDIF
+		loF = loM.ExploreBar(tcId)
+		IF ISNULL(loF)
+			loM.ExploreSay(This, loM.cLastError)
+			RETURN .F.
+		ENDIF
+		loM.SetCurrent(tcId)
+		RETURN .T.
 	ENDPROC
 ENDDEFINE
 
@@ -4769,42 +5625,74 @@ ENDDEFINE
 *-- y la línea para abrirla, en el cuadro de abajo.
 DEFINE CLASS DataViewForm AS DataConnectionForm
 	Width = 560
-	Height = 520
+	Height = 616
 	cTable = ""
-	lCtrlA = .F.      && el ON KEY LABEL CTRL+A de la lista está puesto
-	DIMENSION aCols[1] && las columnas en el orden de la tabla (la lista va en alfabético)
+	lCtrlA = .F.      && el ON KEY LABEL CTRL+A de una de las listas está puesto
+	DIMENSION aCols[1] && las columnas en el orden de la tabla
+	DIMENSION aSorted[1] && las mismas en orden alfabético: las filas de Available, una por una
+	cGray = ""        && las filas de Available en gris, «|col|» cada una (List() no dice si lo está)
 	cMadeView = ""    && la vista que hizo Create en esta ventana (la que abre Open)
 	cMadeDbc = ""     && y su .dbc
 	lMadePwd = .F.    && si su conexión llevaba contraseña (PWD en la cadena viva): Open la necesita
 	cTableKey = ""    && la clave primaria de la tabla, para decirla en otro idioma
 	lReplace = .F.    && el nombre es de una vista que ya está en el .dbc: Crear dice Reemplazar
+	*-- El modo «desde SQL» (Create view... de Query...): la sentencia, y lo que se
+	*-- sabe de ella (ViewFromQuery). Sin listas, Where, Order by ni Updatable.
+	cSql = ""
+	cSqlWrap = ""
+	cSqlTypes = ""
+	cSqlShort = ""
+	cSqlShortEn = ""
 
 	ADD OBJECT lblDbc AS Label WITH Caption = "\<Database", Left = 10, Top = 14, AutoSize = .T.
 	ADD OBJECT cboDbc AS ComboBox WITH Left = 100, Top = 10, Width = 450, Height = 24, Style = 0
 	ADD OBJECT lblName AS Label WITH Caption = "View \<name", Left = 10, Top = 46, AutoSize = .T.
 	ADD OBJECT txtName AS TextBox WITH Left = 100, Top = 42, Width = 250, Height = 25, Value = ""
-	ADD OBJECT lblCols AS Label WITH Caption = "\<Columns", Left = 10, Top = 78, AutoSize = .T.
-	ADD OBJECT lstCols AS ListBox WITH Left = 100, Top = 76, Width = 450, Height = 150, MultiSelect = .T.
-	*-- Para quien no sabe que CTRL+A las marca todas.
-	ADD OBJECT cmdAll AS CommandButton WITH Caption = "All", Left = 10, Top = 100, Width = 80, Height = 24
-	ADD OBJECT cmdNone AS CommandButton WITH Caption = "None", Left = 10, Top = 128, Width = 80, Height = 24
-	ADD OBJECT lblWhere AS Label WITH Caption = "\<Where", Left = 10, Top = 238, AutoSize = .T.
-	ADD OBJECT txtWhere AS TextBox WITH Left = 100, Top = 234, Width = 450, Height = 25, Value = ""
+	*-- Las columnas, como en el diseñador de vistas de VFP: con muchas no se
+	*-- veía cuáles estaban marcadas. A la
+	*-- izquierda, todas las de la tabla en orden alfabético, y en gris las que ya
+	*-- van en la vista; a la derecha, las que van, en el orden de la vista, que
+	*-- se cambia con las barras o con CTRL+FLECHA. De entrada, ninguna. Add y
+	*-- Remove pasan las elegidas de una a otra, y también el doble clic o ENTER
+	*-- en una lista.
+	ADD OBJECT lblAvailable AS Label WITH Caption = "Available \<columns", Left = 10, Top = 76, AutoSize = .T.
+	ADD OBJECT lstAvailable AS ListBox WITH Left = 10, Top = 94, Width = 200, Height = 196, MultiSelect = .T.
+	ADD OBJECT cmdAdd AS CommandButton WITH Caption = "\<Add >", Left = 220, Top = 112, Width = 120, Height = 24
+	ADD OBJECT cmdAddAll AS CommandButton WITH Caption = "Add a\<ll >>", Left = 220, Top = 142, Width = 120, Height = 24
+	ADD OBJECT cmdRemove AS CommandButton WITH Caption = "< Re\<move", Left = 220, Top = 188, Width = 120, Height = 24
+	ADD OBJECT cmdRemoveAll AS CommandButton WITH Caption = "<< R\<emove all", Left = 220, Top = 218, Width = 120, Height = 24
+	ADD OBJECT lblChosen AS Label WITH Caption = "\<Selected columns", Left = 350, Top = 76, AutoSize = .T.
+	ADD OBJECT lstChosen AS ListBox WITH Left = 350, Top = 94, Width = 200, Height = 196, MultiSelect = .T., MoverBars = .T.
+	*-- La sentencia, en el modo «desde SQL»: donde van las listas, de solo lectura.
+	ADD OBJECT lblSql AS Label WITH Caption = "SQL", Left = 10, Top = 76, AutoSize = .T., Visible = .F.
+	ADD OBJECT edtSqlView AS EditBox WITH Left = 10, Top = 94, Width = 540, Height = 262, ReadOnly = .T., ScrollBars = 2, ;
+		FontName = "Courier New", FontSize = 10, Value = "", Visible = .F.
+	ADD OBJECT lblWhere AS Label WITH Caption = "\<Where", Left = 10, Top = 302, AutoSize = .T.
+	ADD OBJECT txtWhere AS TextBox WITH Left = 100, Top = 298, Width = 450, Height = 25, Value = ""
+	*-- El orden de las filas, como lo toma el motor (name DESC, id).
+	ADD OBJECT lblOrder AS Label WITH Caption = "Order \<by", Left = 10, Top = 334, AutoSize = .T.
+	ADD OBJECT txtOrder AS TextBox WITH Left = 100, Top = 330, Width = 450, Height = 25, Value = ""
 	ADD OBJECT chkUpdatable AS CheckBox WITH Caption = "\<Updatable: TABLEUPDATE() sends the changes to the server", ;
-		Left = 100, Top = 268, AutoSize = .T., Value = .F.
-	ADD OBJECT lblKey AS Label WITH Caption = "", Left = 100, Top = 290, Width = 450, Height = 18
-	ADD OBJECT edtSay AS EditBox WITH Left = 10, Top = 314, Width = 540, Height = 80, ReadOnly = .T., ScrollBars = 2, Value = ""
-	ADD OBJECT lblLines AS Label WITH Caption = "To open it from the Command window:", Left = 10, Top = 400, AutoSize = .T.
-	ADD OBJECT edtLines AS EditBox WITH Left = 10, Top = 418, Width = 540, Height = 54, ReadOnly = .T., ScrollBars = 2, Value = ""
+		Left = 100, Top = 364, AutoSize = .T., Value = .F.
+	ADD OBJECT lblKey AS Label WITH Caption = "", Left = 100, Top = 386, Width = 450, Height = 18
+	ADD OBJECT edtSay AS EditBox WITH Left = 10, Top = 410, Width = 540, Height = 80, ReadOnly = .T., ScrollBars = 2, Value = ""
+	ADD OBJECT lblLines AS Label WITH Caption = "To open it from the Command window:", Left = 10, Top = 496, AutoSize = .T.
+	ADD OBJECT edtLines AS EditBox WITH Left = 10, Top = 514, Width = 540, Height = 54, ReadOnly = .T., ScrollBars = 2, Value = ""
 	*-- Open, apagado hasta que Create hace la vista.
-	ADD OBJECT cmdHelp AS CommandButton WITH Caption = "\<Help", Left = 10, Top = 482, Width = 90, Height = 28
-	ADD OBJECT cmdOpen AS CommandButton WITH Caption = "\<Open", Left = 260, Top = 482, Width = 90, Height = 28, Enabled = .F.
-	ADD OBJECT cmdCreate AS CommandButton WITH Caption = "C\<reate", Left = 360, Top = 482, Width = 90, Height = 28, Default = .T.
-	ADD OBJECT cmdClose AS CommandButton WITH Caption = "Close", Left = 460, Top = 482, Width = 90, Height = 28, Cancel = .T.
+	ADD OBJECT cmdHelp AS CommandButton WITH Caption = "\<Help", Left = 10, Top = 578, Width = 90, Height = 28
+	ADD OBJECT cmdOpen AS CommandButton WITH Caption = "\<Open", Left = 260, Top = 578, Width = 90, Height = 28, Enabled = .F.
+	ADD OBJECT cmdCreate AS CommandButton WITH Caption = "C\<reate", Left = 360, Top = 578, Width = 90, Height = 28, Default = .T.
+	ADD OBJECT cmdClose AS CommandButton WITH Caption = "Close", Left = 460, Top = 578, Width = 90, Height = 28, Cancel = .T.
 
 	PROCEDURE Init
 		LPARAMETERS toModule, toC, tcTable
-		LOCAL lcChoices, lnI, lcCur, lnDs, lcKey, loDb, lnN, laSorted[1]
+		LOCAL lcChoices, lnI, lcCur, lnDs, lcKey, loDb, lnN
+		*-- Desde Query...: en vez de la tabla, la sentencia (ViewFromQuery).
+		IF VARTYPE(tcTable) == "O"
+			DODEFAULT(toModule, toC)
+			This.InitSql(toModule, tcTable)
+			RETURN
+		ENDIF
 		DODEFAULT(toModule, toC)
 		This.cTable = tcTable
 		This.Texts()
@@ -4815,9 +5703,8 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		ENDFOR
 		This.cboDbc.Value = GETWORDNUM(lcChoices, 1, CHR(13))
 		This.txtName.Value = "v_" + LOWER(CHRTRAN(tcTable, CHRTRAN(LOWER(tcTable), "abcdefghijklmnopqrstuvwxyz0123456789_", ""), ""))
-		*-- Las columnas, todas marcadas; y la clave. La lista, en orden alfabético
-		*-- sin distinguir mayúsculas; aCols guarda el de la tabla, que es el de la
-		*-- vista (Marked).
+		*-- Las columnas, en el orden de la tabla (aCols) y en alfabético
+		*-- (aSorted, las filas de Available), ninguna en la vista; y la clave.
 		lcCur = "FDV" + SYS(2015)
 		IF !EMPTY(toModule.Columns(toC.cId, tcTable, lcCur)) OR This.TableColumns(toModule, toC, tcTable, lcCur)
 			lnDs = SET("DATASESSION")
@@ -4831,20 +5718,9 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 			ENDSCAN
 			USE IN (lcCur)
 			SET DATASESSION TO (lnDs)
-			IF lnN > 0
-				DIMENSION laSorted[lnN]
-				=ACOPY(This.aCols, laSorted)
-				=ASORT(laSorted, 1, -1, 0, 1)
-				FOR lnI = 1 TO lnN
-					This.lstCols.AddItem(laSorted[lnI])
-					This.lstCols.Selected(lnI) = .T.
-				ENDFOR
-				*-- Arriba, en la primera columna: marcarlas en el bucle deja TopIndex abajo
-				*-- del todo. ListIndex 1 no quita ninguna marca.
-				This.lstCols.TopIndex = 1
-				This.lstCols.ListIndex = 1
-			ENDIF
 		ENDIF
+		This.FillAvailable()
+		This.ToTop(This.lstAvailable)
 		loDb = toModule.Live(toC.cId)
 		lcKey = IIF(ISNULL(loDb), "", loDb.GetPrimaryKey(tcTable))
 		This.chkUpdatable.Enabled = !EMPTY(lcKey)
@@ -4852,6 +5728,35 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		This.chkUpdatable.Value = toModule.ViewUpdatable()
 		This.cTableKey = lcKey
 		This.KeyText()
+		This.CreateMode(.T.)
+	ENDPROC
+
+	*-- El modo «desde SQL»: fuera las listas, Where, Order by y Updatable, y a la
+	*-- vista la sentencia. La base, el nombre, Create, Open y las líneas, como
+	*-- siempre.
+	PROCEDURE InitSql
+		LPARAMETERS toModule, toSql
+		LOCAL lcChoices, lnI, lcCtl
+		This.cSql = toSql.cSql
+		This.cSqlWrap = toSql.cWrap
+		This.cSqlTypes = toSql.cTypes
+		This.cSqlShort = toSql.cShort
+		This.cSqlShortEn = toSql.cShortEn
+		FOR lnI = 1 TO 14
+			lcCtl = GETWORDNUM("lblAvailable lstAvailable cmdAdd cmdAddAll cmdRemove cmdRemoveAll lblChosen lstChosen " + ;
+				"lblWhere txtWhere lblOrder txtOrder chkUpdatable lblKey", lnI)
+			This.&lcCtl..Visible = .F.
+		ENDFOR
+		This.lblSql.Visible = .T.
+		This.edtSqlView.Visible = .T.
+		This.edtSqlView.Value = toSql.cSql
+		This.Texts()
+		lcChoices = toModule.DbcChoices(This.cConnId)
+		FOR lnI = 1 TO GETWORDCOUNT(lcChoices, CHR(13))
+			This.cboDbc.AddItem(GETWORDNUM(lcChoices, lnI, CHR(13)))
+		ENDFOR
+		This.cboDbc.Value = GETWORDNUM(lcChoices, 1, CHR(13))
+		This.txtName.Value = "v_query"
 		This.CreateMode(.T.)
 	ENDPROC
 
@@ -4864,24 +5769,34 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		ENDIF
 		LOCAL loM
 		loM = This.oModule
-		This.Caption = loM.T("data.view.caption", This.cTable, This.cConnName)
+		This.Caption = IIF(EMPTY(This.cSql), loM.T("data.view.caption", This.cTable, This.cConnName), ;
+			loM.T("data.view.captionSql", This.cConnName))
+		This.lblSql.Caption = loM.T("data.view.sql")
 		This.lblDbc.Caption = loM.T("data.view.database")
 		This.AfterLabel(This.lblDbc, This.cboDbc)
 		This.lblName.Caption = loM.T("data.view.name")
 		This.AfterLabel(This.lblName, This.txtName)
-		This.lblCols.Caption = loM.T("data.view.columns")
+		This.lblAvailable.Caption = loM.T("data.view.available")
+		This.lblChosen.Caption = loM.T("data.view.chosen")
+		This.cmdAdd.Caption = loM.T("data.view.add")
+		This.cmdAddAll.Caption = loM.T("data.view.addAll")
+		This.cmdRemove.Caption = loM.T("data.view.remove")
+		This.cmdRemoveAll.Caption = loM.T("data.view.removeAll")
 		This.lblWhere.Caption = loM.T("data.view.where")
+		This.lblOrder.Caption = loM.T("data.view.orderBy")
+		This.AfterLabel(This.lblOrder, This.txtOrder)
 		This.chkUpdatable.Caption = loM.T("data.view.updatable")
 		This.lblLines.Caption = loM.T("data.view.lines")
 		This.cmdCreate.Caption = loM.T(IIF(This.lReplace, "data.view.replace", "data.view.create"))
 		This.cmdOpen.Caption = loM.T("data.view.open")
 		This.cmdClose.Caption = loM.T("data.view.close")
-		This.cmdAll.Caption = loM.T("data.view.all")
-		This.cmdNone.Caption = loM.T("data.view.none")
 		This.KeyText()
 	ENDPROC
 
 	PROCEDURE KeyText
+		IF !EMPTY(This.cSql)
+			RETURN
+		ENDIF
 		This.lblKey.Caption = IIF(EMPTY(This.cTableKey), This.oModule.T("data.view.noKey", This.cTable), ;
 			This.oModule.T("data.view.key", This.cTableKey))
 	ENDPROC
@@ -4902,46 +5817,202 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		RETURN llOk
 	ENDPROC
 
-	*-- Las columnas marcadas, separadas por comas, en el orden de la tabla (la
-	*-- lista va en alfabético).
+	*-- Las columnas de la vista, separadas por comas, en el orden de Selected
+	*-- columns.
 	PROCEDURE Marked
-		LOCAL lnI, lnJ, lcOut
+		LOCAL lnI, lcOut
 		lcOut = ""
-		FOR lnI = 1 TO ALEN(This.aCols)
-			FOR lnJ = 1 TO This.lstCols.ListCount
-				IF This.lstCols.Selected(lnJ) AND This.lstCols.List(lnJ) == This.aCols[lnI]
-					lcOut = lcOut + IIF(EMPTY(lcOut), "", ",") + This.aCols[lnI]
-				ENDIF
-			ENDFOR
+		FOR lnI = 1 TO This.lstChosen.ListCount
+			lcOut = lcOut + IIF(lnI = 1, "", ",") + This.lstChosen.List(lnI)
 		ENDFOR
 		RETURN lcOut
 	ENDPROC
 
-	*-- All y None, y CTRL+A en la lista.
+	*-- Available columns: todas las de la tabla, en orden alfabético sin
+	*-- distinguir mayúsculas (aSorted). Se llena una vez; luego cada fila se
+	*-- pone en gris o se vuelve a encender en su sitio (Gray), y la lista no se
+	*-- mueve.
+	PROCEDURE FillAvailable
+		LOCAL lnI, lnN
+		This.lstAvailable.Clear()
+		This.cGray = ""
+		lnN = ALEN(This.aCols)
+		IF lnN = 1 AND EMPTY(This.aCols[1])
+			RETURN
+		ENDIF
+		DIMENSION This.aSorted[lnN]
+		=ACOPY(This.aCols, This.aSorted)
+		=ASORT(This.aSorted, 1, -1, 0, 1)
+		FOR lnI = 1 TO lnN
+			This.lstAvailable.AddItem(This.aSorted[lnI])
+		ENDFOR
+	ENDPROC
+
+	*-- ¿Va ya en la vista?
+	PROCEDURE InView
+		LPARAMETERS tcCol
+		LOCAL lnI
+		FOR lnI = 1 TO This.lstChosen.ListCount
+			IF This.lstChosen.List(lnI) == tcCol
+				RETURN .T.
+			ENDIF
+		ENDFOR
+		RETURN .F.
+	ENDPROC
+
+	*-- La fila de Available de esa columna, en gris (tlOff) o encendida. Con
+	*-- «\]» delante, VFP la pinta en gris y no deja elegirla con el ratón ni con
+	*-- el teclado. Por código sí se elige, y List() la devuelve sin «\]»:
+	*-- quien la mira pregunta a InView, y cGray
+	*-- dice cuáles se pusieron en gris.
+	PROCEDURE Gray
+		LPARAMETERS tcCol, tlOff
+		LOCAL lnI
+		IF ("|" + tcCol + "|" $ This.cGray) == tlOff
+			RETURN
+		ENDIF
+		FOR lnI = 1 TO ALEN(This.aSorted)
+			IF This.aSorted[lnI] == tcCol
+				IF This.lstAvailable.Selected(lnI)
+					This.lstAvailable.Selected(lnI) = .F.
+				ENDIF
+				This.lstAvailable.List(lnI) = IIF(tlOff, "\]", "") + tcCol
+				This.cGray = IIF(tlOff, This.cGray + "|" + tcCol + "|", STRTRAN(This.cGray, "|" + tcCol + "|", ""))
+				EXIT
+			ENDIF
+		ENDFOR
+	ENDPROC
+
+	*-- Una lista arriba del todo y sin nada elegido.
+	PROCEDURE ToTop
+		LPARAMETERS toList
+		LOCAL lnI
+		FOR lnI = 1 TO toList.ListCount
+			toList.Selected(lnI) = .F.
+		ENDFOR
+		IF toList.ListCount > 0
+			toList.TopIndex = 1
+		ENDIF
+	ENDPROC
+
+	*-- Tras pasar las elegidas a la otra lista, en esta queda elegida la que
+	*-- ocupa ahora el sitio de la primera que se fue: otro Remove (o ENTER)
+	*-- sigue por ahí.
+	PROCEDURE PickAt
+		LPARAMETERS toList, tnAt
+		This.ToTop(toList)
+		IF toList.ListCount > 0
+			toList.ListIndex = MIN(tnAt, toList.ListCount)
+		ENDIF
+	ENDPROC
+
+	*-- En Available, tras Add: elegida la primera encendida desde tnAt (otro Add
+	*-- o ENTER sigue por ahí). Las añadidas ya se desmarcaron al ponerlas en gris.
+	PROCEDURE PickNextAvailable
+		LPARAMETERS tnAt
+		LOCAL lnI
+		FOR lnI = tnAt TO This.lstAvailable.ListCount
+			IF !This.InView(This.aSorted[lnI])
+				This.lstAvailable.ListIndex = lnI
+				EXIT
+			ENDIF
+		ENDFOR
+	ENDPROC
+
+	*-- Add: las elegidas de Available que no van ya, al final de la vista y en
+	*-- el orden de la lista; en Available se quedan, en gris. La última añadida
+	*-- queda elegida y a la vista.
+	PROCEDURE AddMarked
+		LOCAL lnI, lnFirst, lcCol, lcNew
+		lnFirst = 0
+		lcNew = ""
+		FOR lnI = 1 TO This.lstAvailable.ListCount
+			lcCol = This.aSorted[lnI]
+			IF This.lstAvailable.Selected(lnI) AND !This.InView(lcCol)
+				This.lstChosen.AddItem(lcCol)
+				lcNew = lcNew + lcCol + CHR(13)
+				lnFirst = IIF(lnFirst = 0, lnI, lnFirst)
+			ENDIF
+		ENDFOR
+		IF lnFirst = 0
+			RETURN .F.
+		ENDIF
+		FOR lnI = 1 TO GETWORDCOUNT(lcNew, CHR(13))
+			This.Gray(GETWORDNUM(lcNew, lnI, CHR(13)), .T.)
+		ENDFOR
+		This.PickNextAvailable(lnFirst)
+		This.PickAt(This.lstChosen, This.lstChosen.ListCount)
+		This.Changed()
+		RETURN .T.
+	ENDPROC
+
+	*-- Remove: las elegidas de la vista se vuelven a encender en Available.
+	PROCEDURE RemoveMarked
+		LOCAL lnI, lnFirst
+		lnFirst = 0
+		FOR lnI = This.lstChosen.ListCount TO 1 STEP -1
+			IF This.lstChosen.Selected(lnI)
+				This.Gray(This.lstChosen.List(lnI), .F.)
+				This.lstChosen.RemoveItem(lnI)
+				lnFirst = lnI
+			ENDIF
+		ENDFOR
+		IF lnFirst = 0
+			RETURN .F.
+		ENDIF
+		This.PickAt(This.lstChosen, lnFirst)
+		This.Changed()
+		RETURN .T.
+	ENDPROC
+
+	*-- Add all (.T.): las que faltan, al final y en el orden de la tabla, y
+	*-- todo Available en gris. Remove all (.F.): ninguna, y todo encendido.
 	PROCEDURE MarkAll
 		LPARAMETERS tlOn
 		LOCAL lnI
-		FOR lnI = 1 TO This.lstCols.ListCount
-			This.lstCols.Selected(lnI) = tlOn
-		ENDFOR
-		*-- Marcarlas deja la lista al final: vuelve arriba, y con todas, la primera
-		*-- elegida.
-		IF This.lstCols.ListCount > 0
-			This.lstCols.TopIndex = 1
-			IF tlOn
-				This.lstCols.ListIndex = 1
-			ENDIF
+		IF tlOn
+			FOR lnI = 1 TO ALEN(This.aCols)
+				IF !EMPTY(This.aCols[lnI]) AND !This.InView(This.aCols[lnI])
+					This.lstChosen.AddItem(This.aCols[lnI])
+				ENDIF
+			ENDFOR
+		ELSE
+			This.lstChosen.Clear()
 		ENDIF
+		FOR lnI = 1 TO ALEN(This.aSorted)
+			IF !EMPTY(This.aSorted[lnI])
+				This.Gray(This.aSorted[lnI], tlOn)
+			ENDIF
+		ENDFOR
+		This.ToTop(This.lstChosen)
+		This.ToTop(This.lstAvailable)
 		This.Changed()
 	ENDPROC
 
-	*-- CTRL+A no llega al KeyPress de la lista: se lo queda Edit > Select All del
-	*-- IDE. Mientras la lista tiene el foco lo toma un ON KEY LABEL; PUSH KEY
-	*-- guarda los que hubiera y POP KEY los repone.
+	*-- CTRL+A en una lista: las elige todas (en Available, las encendidas); Add
+	*-- o Remove las pasan luego.
+	PROCEDURE SelectAllInList
+		LOCAL loL, lnI, llAvail
+		loL = This.ActiveControl
+		IF TYPE("loL.Name") # "C" OR !INLIST(UPPER(loL.Name), "LSTAVAILABLE", "LSTCHOSEN")
+			RETURN
+		ENDIF
+		llAvail = UPPER(loL.Name) == "LSTAVAILABLE"
+		FOR lnI = 1 TO loL.ListCount
+			loL.Selected(lnI) = !llAvail OR !This.InView(This.aSorted[lnI])
+		ENDFOR
+		IF loL.ListCount > 0
+			loL.TopIndex = 1
+		ENDIF
+	ENDPROC
+
+	*-- CTRL+A no llega al KeyPress de una lista: se lo queda Edit > Select All
+	*-- del IDE. Mientras una lista tiene el foco lo toma un ON KEY LABEL; PUSH
+	*-- KEY guarda los que hubiera y POP KEY los repone.
 	PROCEDURE CtrlAOn
 		IF !This.lCtrlA
 			PUSH KEY
-			ON KEY LABEL CTRL+A _screen.ActiveForm.MarkAll(.T.)
+			ON KEY LABEL CTRL+A _screen.ActiveForm.SelectAllInList()
 			This.lCtrlA = .T.
 		ENDIF
 	ENDPROC
@@ -4953,16 +6024,38 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		ENDIF
 	ENDPROC
 
-	PROCEDURE lstCols.GotFocus
+	PROCEDURE lstAvailable.GotFocus
 		Thisform.CtrlAOn()
 	ENDPROC
 
-	PROCEDURE lstCols.LostFocus
+	PROCEDURE lstAvailable.LostFocus
 		Thisform.CtrlAOff()
 	ENDPROC
 
+	PROCEDURE lstChosen.GotFocus
+		Thisform.CtrlAOn()
+	ENDPROC
+
+	PROCEDURE lstChosen.LostFocus
+		Thisform.CtrlAOff()
+	ENDPROC
+
+	PROCEDURE lstAvailable.DblClick
+		Thisform.AddMarked()
+	ENDPROC
+
+	PROCEDURE lstChosen.DblClick
+		Thisform.RemoveMarked()
+	ENDPROC
+
+	*-- Mover una con las barras cambia el orden de la vista.
+	PROCEDURE lstChosen.OnMoveItem
+		LPARAMETERS nSource, nShift, nCurrentIndex, nMoveBy
+		Thisform.Changed()
+	ENDPROC
+
 	PROCEDURE Activate
-		IF TYPE("This.ActiveControl.Name") == "C" AND UPPER(This.ActiveControl.Name) == "LSTCOLS"
+		IF TYPE("This.ActiveControl.Name") == "C" AND INLIST(UPPER(This.ActiveControl.Name), "LSTAVAILABLE", "LSTCHOSEN")
 			This.CtrlAOn()
 		ENDIF
 	ENDPROC
@@ -4976,11 +6069,19 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		DODEFAULT()
 	ENDPROC
 
-	PROCEDURE cmdAll.Click
+	PROCEDURE cmdAdd.Click
+		Thisform.AddMarked()
+	ENDPROC
+
+	PROCEDURE cmdAddAll.Click
 		Thisform.MarkAll(.T.)
 	ENDPROC
 
-	PROCEDURE cmdNone.Click
+	PROCEDURE cmdRemove.Click
+		Thisform.RemoveMarked()
+	ENDPROC
+
+	PROCEDURE cmdRemoveAll.Click
 		Thisform.MarkAll(.F.)
 	ENDPROC
 
@@ -5000,9 +6101,15 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		ENDIF
 		lcTalk = SET("TALK")
 		SET TALK OFF
-		llMade = Thisform.oModule.CreateView(Thisform, Thisform.cTable, ALLTRIM(TRANSFORM(Thisform.cboDbc.Value)), ;
-			ALLTRIM(Thisform.txtName.Value), Thisform.Marked(), ALLTRIM(Thisform.txtWhere.Value), ;
-			Thisform.chkUpdatable.Enabled AND Thisform.chkUpdatable.Value, Thisform.lReplace)
+		IF EMPTY(Thisform.cSql)
+			llMade = Thisform.oModule.CreateView(Thisform, Thisform.cTable, ALLTRIM(TRANSFORM(Thisform.cboDbc.Value)), ;
+				ALLTRIM(Thisform.txtName.Value), Thisform.Marked(), ALLTRIM(Thisform.txtWhere.Value), ;
+				Thisform.chkUpdatable.Enabled AND Thisform.chkUpdatable.Value, Thisform.lReplace, ALLTRIM(Thisform.txtOrder.Value))
+		ELSE
+			llMade = Thisform.oModule.CreateViewFromSql(Thisform, ALLTRIM(TRANSFORM(Thisform.cboDbc.Value)), ;
+				ALLTRIM(Thisform.txtName.Value), Thisform.cSql, Thisform.cSqlWrap, Thisform.lReplace, Thisform.cSqlTypes, ;
+				Thisform.cSqlShort, Thisform.cSqlShortEn)
+		ENDIF
 		SET TALK &lcTalk
 		IF llMade
 			This.Enabled = .F.
@@ -5044,7 +6151,7 @@ DEFINE CLASS DataViewForm AS DataConnectionForm
 		Thisform.Changed()
 	ENDPROC
 
-	PROCEDURE lstCols.InteractiveChange
+	PROCEDURE txtOrder.InteractiveChange
 		Thisform.Changed()
 	ENDPROC
 
@@ -5068,42 +6175,68 @@ ENDDEFINE
 *-- pegado abajo.
 DEFINE CLASS DataQueryForm AS DataConnectionForm
 	Width = 560
-	Height = 360
+	Height = 392
 	BorderStyle = 3
 	MaxButton = .T.
 	MinWidth = 560
-	MinHeight = 326
+	MinHeight = 358
 	cTitleEn = "Query..."
 	cResult = ""      && el cursor del último Run que salió bien
+	cWholeSql = ""    && la escritura de tabla entera que espera «Run it anyway»
+	*-- La última sentencia que se corrió bien y lee (enciende Create view...), y
+	*-- lo que se sabe de ella para la vista.
+	cRanSql = ""
+	cRanWrap = ""
+	cRanTypes = ""
+	cRanShort = ""
+	cRanShortEn = ""
 
-	ADD OBJECT edtSql AS EditBox WITH Left = 10, Top = 10, Width = 540, Height = 200, FontName = "Courier New", ;
+	*-- El orden de tabulación empieza por el SQL (D36g): lo que se teclea al abrir la
+	*-- ventana va ahí, como antes del selector, que va detrás aunque esté arriba.
+	ADD OBJECT edtSql AS EditBox WITH Left = 10, Top = 42, Width = 540, Height = 200, FontName = "Courier New", ;
 		FontSize = 10, Value = "SELECT ", Anchor = 15
-	ADD OBJECT lblError AS Label WITH Caption = "", Left = 10, Top = 216, Width = 540, Height = 40, WordWrap = .T., ;
+	*-- La conexión de la ventana: elegir otra cambia esta ventana a esa (UseConn).
+	ADD OBJECT lblConn AS Label WITH Caption = "Connection", Left = 10, Top = 14, AutoSize = .T.
+	ADD OBJECT cboConn AS ComboBox WITH Left = 90, Top = 10, Width = 460, Height = 24, Style = 2, Anchor = 11
+	ADD OBJECT lblError AS Label WITH Caption = "", Left = 10, Top = 248, Width = 540, Height = 40, WordWrap = .T., ;
 		ForeColor = RGB(170, 0, 0), Anchor = 14
-	ADD OBJECT lblLimit AS Label WITH Caption = "\<Limit", Left = 10, Top = 268, AutoSize = .T., Anchor = 6
-	ADD OBJECT spnLimit AS Spinner WITH Left = 50, Top = 264, Width = 80, Height = 24, Value = 100, ;
+	ADD OBJECT lblLimit AS Label WITH Caption = "\<Limit", Left = 10, Top = 300, AutoSize = .T., Anchor = 6
+	ADD OBJECT spnLimit AS Spinner WITH Left = 50, Top = 296, Width = 80, Height = 24, Value = 100, ;
 		SpinnerLowValue = 0, SpinnerHighValue = 1000000, KeyboardLowValue = 0, KeyboardHighValue = 1000000, Increment = 100, ;
 		Anchor = 6
-	ADD OBJECT lblNoLimit AS Label WITH Caption = "rows (0 = no limit)", Left = 136, Top = 268, AutoSize = .T., Anchor = 6
+	ADD OBJECT lblNoLimit AS Label WITH Caption = "rows (0 = no limit)", Left = 136, Top = 300, AutoSize = .T., Anchor = 6
 	*-- Help va debajo: abajo a la izquierda están el límite y Keep.
-	ADD OBJECT cmdHelp AS CommandButton WITH Caption = "\<Help", Left = 10, Top = 328, Width = 90, Height = 28, Anchor = 6
-	ADD OBJECT cmdRun AS CommandButton WITH Caption = "\<Run", Left = 360, Top = 262, Width = 90, Height = 28, Anchor = 12
-	ADD OBJECT cmdClose AS CommandButton WITH Caption = "Close", Left = 460, Top = 262, Width = 90, Height = 28, Cancel = .T., ;
+	ADD OBJECT cmdHelp AS CommandButton WITH Caption = "\<Help", Left = 10, Top = 360, Width = 90, Height = 28, Anchor = 6
+	ADD OBJECT cmdRun AS CommandButton WITH Caption = "\<Run", Left = 360, Top = 294, Width = 90, Height = 28, Anchor = 12
+	ADD OBJECT cmdClose AS CommandButton WITH Caption = "Close", Left = 460, Top = 294, Width = 90, Height = 28, Cancel = .T., ;
 		Anchor = 12
 	*-- El cursor de Run se va al cerrarla, salvo con esto.
-	ADD OBJECT chkKeep AS CheckBox WITH Caption = "Keep the cursors open when it closes", Left = 10, Top = 298, ;
+	ADD OBJECT chkKeep AS CheckBox WITH Caption = "Keep the cursors open when it closes", Left = 10, Top = 330, ;
 		AutoSize = .T., Value = .F., Anchor = 6
 	*-- To object: el resultado en pantalla a una Collection PUBLIC, con el nombre de al lado.
-	ADD OBJECT lblObject AS Label WITH Caption = "Variable", Left = 250, Top = 300, AutoSize = .T., Anchor = 6
-	ADD OBJECT txtObject AS TextBox WITH Left = 300, Top = 296, Width = 150, Height = 24, Value = "", MaxLength = 128, Anchor = 6
-	ADD OBJECT cmdObject AS CommandButton WITH Caption = "To \<object", Left = 460, Top = 294, Width = 90, Height = 28, Anchor = 12
+	ADD OBJECT lblObject AS Label WITH Caption = "Variable", Left = 250, Top = 332, AutoSize = .T., Anchor = 6
+	ADD OBJECT txtObject AS TextBox WITH Left = 300, Top = 328, Width = 150, Height = 24, Value = "", MaxLength = 128, Anchor = 6
+	ADD OBJECT cmdObject AS CommandButton WITH Caption = "To \<object", Left = 460, Top = 326, Width = 90, Height = 28, Anchor = 12
+	*-- Una escritura de tabla entera (UPDATE o DELETE sin WHERE, DROP, TRUNCATE):
+	*-- el motivo, en lblError, y este botón al lado; cambiar el SQL lo quita.
+	ADD OBJECT cmdWhole AS CommandButton WITH Caption = "Run it anyway", Left = 400, Top = 252, Width = 150, Height = 28, ;
+		Visible = .F., Anchor = 12
+	*-- Create view...: una vista de la sentencia de la caja, encendido solo
+	*-- cuando es la última que se corrió bien y lee.
+	ADD OBJECT cmdView AS CommandButton WITH Caption = "Create \<view...", Left = 400, Top = 360, Width = 150, Height = 28, ;
+		Enabled = .F., Anchor = 12
 
+	*-- tcSql: el SQL con el que empieza (Query... de Explore...); sin él, «SELECT ».
 	PROCEDURE Init
-		LPARAMETERS toModule, toC
+		LPARAMETERS toModule, toC, tcSql
 		DODEFAULT(toModule, toC)
 		This.Texts()
 		This.chkKeep.Value = toModule.KeepCursors("query")
 		This.spnLimit.Value = toModule.QueryLimit()
+		IF VARTYPE(tcSql) == "C" AND !EMPTY(tcSql)
+			This.edtSql.Value = tcSql
+			This.edtSql.SelStart = LEN(tcSql)
+		ENDIF
 	ENDPROC
 
 	*-- Los textos, en el idioma de FoxDock, también al cambiarlo con la ventana
@@ -5115,7 +6248,14 @@ DEFINE CLASS DataQueryForm AS DataConnectionForm
 		LOCAL loM, loC
 		loM = This.oModule
 		loC = loM.Find(This.cConnId)
-		This.Caption = loM.T("data.query.caption", loC.cName, loC.cEngine)
+		*-- Una conexión que ya no está en la lista (Reload): el título se queda.
+		IF !ISNULL(loC)
+			This.Caption = loM.T(IIF(loC.lAllowWrite, "data.query.captionWrite", "data.query.caption"), loC.cName, loC.cEngine)
+		ENDIF
+		This.lblConn.Caption = loM.T("data.conn.label")
+		This.AfterLabel(This.lblConn, This.cboConn)
+		This.FillConns()
+		This.cmdWhole.Caption = loM.T("data.query.runWhole")
 		This.chkKeep.Caption = loM.T("data.cursors.keep")
 		This.lblLimit.Caption = loM.T("data.query.limit")
 		This.lblNoLimit.Caption = loM.T("data.query.noLimit")
@@ -5124,23 +6264,204 @@ DEFINE CLASS DataQueryForm AS DataConnectionForm
 		This.cmdObject.Caption = loM.T("data.object.button")
 		This.lblObject.Caption = loM.T("data.object.name")
 		This.AfterLabel(This.lblObject, This.txtObject)
+		This.cmdView.Caption = loM.T("data.query.view")
 	ENDPROC
 
+	*-- Create view... se apaga: hay que volver a correr la sentencia.
+	PROCEDURE ViewOff
+		This.cRanSql = ""
+		This.cRanWrap = ""
+		This.cRanTypes = ""
+		This.cRanShort = ""
+		This.cRanShortEn = ""
+		This.cmdView.Enabled = .F.
+	ENDPROC
+
+	*-- Un SELECT o un WITH lee (RunQuery); lo demás escribe (Write).
 	PROCEDURE cmdRun.Click
 		LOCAL lcTalk, loM, lnLimit
 		lcTalk = SET("TALK")
 		SET TALK OFF
+		IF !Thisform.ConnSettled()
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		loM = Thisform.oModule
+		Thisform.ShowWhole(.F.)
+		Thisform.ViewOff()
+		IF !loM.IsRead(Thisform.edtSql.Value)
+			Thisform.Write(.F.)
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
 		lnLimit = MAX(INT(Thisform.spnLimit.Value), 0)
 		loM.SaveQueryLimit(lnLimit)
 		IF loM.RunQuery(Thisform.cConnId, Thisform.edtSql.Value, lnLimit)
 			Thisform.Keep(loM.cLastCursor)
 			Thisform.cResult = loM.cLastCursor
+			Thisform.cRanSql = Thisform.edtSql.Value
+			Thisform.cRanWrap = loM.cLastWrapSql
+			Thisform.cRanTypes = loM.TypesOf(loM.cLastCursor)
+			Thisform.cRanShort = loM.ShortNote(.T.)
+			Thisform.cRanShortEn = loM.ShortNote(.F.)
+			Thisform.cmdView.Enabled = .T.
 			Thisform.lblError.Caption = loM.T("data.query.rows", loM.nLastRows, IIF(loM.lLastTruncated, loM.T("data.conn.firstN", lnLimit), ""))
 		ELSE
 			Thisform.lblError.Caption = loM.cLastError
 		ENDIF
 		SET TALK &lcTalk
+	ENDPROC
+
+	*-- La escritura del cuadro (Execute con tlIde); tlWhole, confirmada con
+	*-- «Run it anyway». Si falta esa confirmación, el motivo y el botón.
+	PROCEDURE Write
+		LPARAMETERS tlWhole
+		LOCAL loM
+		loM = This.oModule
+		IF loM.Execute(This.cConnId, This.edtSql.Value, tlWhole, .T.)
+			This.lblError.Caption = loM.T("data.query.wrote", loM.cLastStatement, loM.nLastAffected, loM.nLastMs)
+			loM.oHost.Notify(This.lblError.Caption, loM.E("data.query.wrote", loM.cLastStatement, loM.nLastAffected, loM.nLastMs))
+			RETURN .T.
+		ENDIF
+		This.lblError.Caption = loM.cLastError
+		IF loM.lNeedsWhole
+			This.cWholeSql = This.edtSql.Value
+			This.ShowWhole(.T.)
+		ENDIF
+		RETURN .F.
+	ENDPROC
+
+	*-- «Run it anyway» a la vista (lblError le deja sitio) o no.
+	PROCEDURE ShowWhole
+		LPARAMETERS tlOn
+		IF !tlOn
+			This.cWholeSql = ""
+		ENDIF
+		This.cmdWhole.Visible = tlOn
+		This.lblError.Width = IIF(tlOn, This.cmdWhole.Left - 10, This.Width - 10) - This.lblError.Left
+	ENDPROC
+
+	PROCEDURE cmdWhole.Click
+		LOCAL lcTalk
+		lcTalk = SET("TALK")
+		SET TALK OFF
+		*-- Con una elección pendiente, la confirmación era de la conexión de antes.
+		IF Thisform.ConnPending()
+			=Thisform.ConnSettled()
+			Thisform.ShowWhole(.F.)
+			SET TALK &lcTalk
+			RETURN
+		ENDIF
+		IF Thisform.edtSql.Value == Thisform.cWholeSql
+			Thisform.ShowWhole(.F.)
+			=Thisform.Write(.T.)
+		ELSE
+			Thisform.ShowWhole(.F.)
+		ENDIF
+		SET TALK &lcTalk
+	ENDPROC
+
+	*-- Cambiar el SQL quita la confirmación pendiente.
+	PROCEDURE edtSql.InteractiveChange
+		IF Thisform.cmdWhole.Visible AND !(This.Value == Thisform.cWholeSql)
+			Thisform.ShowWhole(.F.)
+		ENDIF
+		IF !(This.Value == Thisform.cRanSql)
+			Thisform.ViewOff()
+		ENDIF
+	ENDPROC
+
+	*-- Con una elección pendiente, la sentencia que corrió era de la conexión de antes.
+	PROCEDURE cmdView.Click
+		IF Thisform.ConnPending()
+			=Thisform.ConnSettled()
+			RETURN
+		ENDIF
+		Thisform.oModule.ViewFromQuery(Thisform)
+	ENDPROC
+
+	*-- Sin código: la elección se decide en Click (ConnClick, en la base).
+	PROCEDURE cboConn.Valid
+		RETURN .T.
+	ENDPROC
+
+	PROCEDURE ConnUse
+		LPARAMETERS tcId
+		RETURN This.UseConn(tcId)
+	ENDPROC
+
+	PROCEDURE cboConn.DropDown
+		Thisform.ConnDropDown()
+	ENDPROC
+
+	PROCEDURE cboConn.KeyPress
+		LPARAMETERS nKeyCode, nShiftAltCtrl
+		Thisform.ConnKey(nKeyCode, nShiftAltCtrl)
+	ENDPROC
+
+	PROCEDURE cboConn.InteractiveChange
+		Thisform.ConnChange()
+	ENDPROC
+
+	PROCEDURE cboConn.Click
+		Thisform.ConnClick()
+	ENDPROC
+
+	*-- Antes de Run, Run it anyway y Create view...: nunca corre nada contra otra
+	*-- conexión que la que enseña el combo. Una elección pendiente se aplica ahora
+	*-- (UseConn); si no queda lista, el combo vuelve a la de la ventana, lblError
+	*-- dice por qué y no se corre nada: .F. Sin elección pendiente, .T.
+	PROCEDURE ConnSettled
+		LOCAL lcId, loM, lcSay
+		This.ConnLater()
+		IF !This.ConnPending()
+			RETURN .T.
+		ENDIF
+		lcId = This.ConnPicked()
+		IF This.UseConn(lcId)
+			RETURN .T.
+		ENDIF
+		loM = This.oModule
+		*-- Un Caption no pasa de 255: el motivo entero ya salió en la barra de estado y
+		*-- en el log (BarReady).
+		lcSay = loM.T("data.query.notMoved", This.ConnNameOf(lcId), This.cConnName, loM.cLastError)
+		This.lblError.Caption = IIF(LEN(lcSay) > 255, LEFT(lcSay, 254) + "…", lcSay)
+		loM.oHost.Log("data.connections: Query... of '" + This.cConnId + "' ran nothing: '" + lcId + "' was chosen and is not ready")
+		RETURN .F.
+	ENDPROC
+
+	*-- Otra conexión en esta misma ventana: el SQL escrito se queda. Si no está
+	*-- lista (no conecta, o falta la contraseña y se abre Connect...), el combo
+	*-- vuelve a la de antes, todo sigue igual y lblError dice por qué. Si lo está,
+	*-- la ventana pasa a ser suya: los cursores de antes como al cerrarse, Create
+	*-- view... y «Run it anyway» apagados (hay que volver a correr), el título de la
+	*-- nueva (si escribe, lo dice ella: el permiso es de cada conexión), y es la
+	*-- conexión actual. No ejecuta nada. .T. si cambió.
+	PROCEDURE UseConn
+		LPARAMETERS tcId
+		LOCAL loM, loC, lcWas
+		loM = This.oModule
+		IF EMPTY(tcId) OR tcId == This.cConnId
+			This.FillConns()
+			RETURN .F.
+		ENDIF
+		IF !loM.ReadyFor(tcId)
+			This.FillConns()
+			This.lblError.Caption = loM.cLastError
+			RETURN .F.
+		ENDIF
+		loC = loM.Find(tcId)
+		lcWas = This.cConnId
+		This.CursorsOfBefore()
+		This.cResult = ""
+		This.ViewOff()
+		This.ShowWhole(.F.)
+		This.SetConn(loC)
+		This.Texts()
+		This.lblError.Caption = loM.T("data.query.nowOn", loC.cName)
+		loM.oHost.Log("data.connections: Query... moved from '" + lcWas + "' to '" + loC.cId + "'; nothing was run")
+		loM.SetCurrent(loC.cId)
+		RETURN .T.
 	ENDPROC
 
 	*-- Sin nombre, el propuesto a partir del cursor.

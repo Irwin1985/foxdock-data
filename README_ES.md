@@ -153,14 +153,22 @@ Lo que no tiene equivalente, y qué se hace con ello:
 
 **FoxDock > Datos > Conexiones** (FoxDock > Data > Connections) guarda las conexiones a tus servidores de bases de datos (SQL Server,
 MySQL, MariaDB, PostgreSQL, Firebird y SQLite) y las abre desde el IDE, por FoxRemote (una librería que el paquete pide
-con `requires`: llega sin tocar en `lib\foxremote\`). Cada conexión es una barra con su submenú:
+con `requires`: llega sin tocar en `lib\foxremote\`). **Explorar...** (Explore...) y **Consulta...** (Query...) están en **Datos** mismo, junto a **Conexiones**, y trabajan con la *conexión actual*, cuyo nombre llevan: **Explorar... (Shop)**, **Consulta... (Shop)**. Sin conexiones, están en gris. Cada conexión es una barra de **Conexiones** con su submenú; la actual lleva **(actual)**:
 
 | Barra | Qué hace |
 |---|---|
 | **Conectar...** (Connect...) | Conecta. Si la conexión tiene `user` y no hay contraseña guardada, una ventanita la pide; con **Recordarla** (Remember) se guarda, cifrada con tu cuenta de Windows |
 | **Desconectar** (Disconnect) | Cierra la conexión |
-| **Explorar...** (Explore...) | La ventana de la conexión: su base, sus tablas y vistas, y las columnas y las filas de cada una (abajo) |
-| **Consulta...** (Query...) | Una ventana con un cuadro para un `SELECT`, las filas que lee como mucho (**Límite** (Limit): 100 de entrada, 0 sin límite; se recuerda) y **Ejecutar** (Run): las filas, en un `BROWSE`. **A objeto** (To object) deja el resultado en una variable para la ventana de comandos (abajo) |
+| **Usar esta conexión** (Use this connection) | La hace la conexión actual: **Explorar...** y **Consulta...** de **Datos** trabajan con ella desde entonces. En gris en la que ya lo es |
+| **Explorar... (<actual>)** (Explore...), en **Datos** | La ventana de la conexión: su base, sus tablas y vistas, y las columnas y las filas de cada una (abajo) |
+| **Consulta... (<actual>)** (Query...), en **Datos** | Una ventana con un cuadro para un `SELECT`, las filas que lee como mucho (**Límite** (Limit): 100 de entrada, 0 sin límite; se recuerda) y **Ejecutar** (Run): las filas, en un `BROWSE`. **A objeto** (To object) deja el resultado en una variable para la ventana de comandos (abajo). En una conexión con **Permitir escribir** (Allow writing, `allowWrite`) también escribe: un `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP` o `TRUNCATE`, los mismos que puede ejecutar el agente, y el cuadro dice qué hizo y cuántas filas; el título dice **lee y escribe**. Un `UPDATE` o un `DELETE` sin `WHERE`, un `DROP` o un `TRUNCATE` no se envía enseguida: el cuadro dice lo que haría y al lado sale **Ejecutarla igualmente** (Run it anyway); cambiar el SQL lo quita. Cada escritura va al log |
+| **Olvidar la contraseña** (Forget password) | Solo en una conexión con `user` y sin autenticación de Windows: borra la contraseña guardada con **Recordarla**. En gris si no hay ninguna guardada. Una conexión abierta sigue abierta; el próximo **Conectar...** pide la contraseña |
+
+**La conexión actual** es una por usuario, guardada en `options.data.connections.current` de `config.json`: la que elegiste con **Usar esta conexión**, o la última que conectaste con su **Conectar...**. Hasta entonces, o si ya no está en la lista, es la primera conectada, o si no la primera de la lista; saberlo no escribe nada. Las tools del agente, **Desconectar**, **Recargar** y una conexión perdida no la cambian. Con la actual sin conectar, **Explorar...** y **Consulta...** conectan antes, como hasta ahora.
+
+**Conexión** (Connection), arriba en **Explorar...** y **Consulta...**, tiene todas las conexiones, cada una con su motor, y **(sin conectar)** en las que no lo están. En **Consulta...**, elegir otra pasa esa ventana a ella: el SQL escrito se queda y no se ejecuta nada; **Crear vista...** y **Ejecutarla igualmente** se apagan (hay que volver a ejecutar); el cursor de antes se va como al cerrar la ventana, salvo con **Dejar los cursores abiertos al cerrar** marcado; y si escribe o no lo dice la conexión nueva. En **Explorar...**, elegir otra abre la ventana de esa, o la trae delante, y esta se queda como estaba. Si la elegida no está lista (no conecta, o pide su contraseña y se abre **Conectar...**), no cambia nada y la ventana dice por qué. Elegir una que sí lo está la hace la conexión actual.
+
+Una elección cuenta cuando se confirma como en cualquier lista de Windows: con **Intro**, o con un clic en una línea de la lista abierta. Recorrer la lista no cuenta: las flechas, Inicio, Fin, una letra o la rueda del ratón solo enseñan otra en la caja, y no se conecta nada. **Esc** con la lista abierta la cierra y devuelve la caja a la conexión de la ventana. Una conexión que se ve en la caja sin confirmar se toma al pulsar **Ejecutar** (en **Explorar...**, un botón como **Mostrar filas**): si está lista, la ventana pasa a ella (en **Explorar...** se abre su ventana y el botón no hace nada en esta); si no lo está, no se ejecuta nada, la caja vuelve a la conexión de la ventana y la ventana dice por qué. Cerrar la ventana la olvida y no conecta a nada.
 
 Los espacios del final de una contraseña tecleada en **Conectar...** se pierden, porque el cuadro de VFP
 rellena lo tecleado con espacios; los del principio se quedan.
@@ -172,7 +180,9 @@ otra vez trae esa ventana delante. En ella:
 - **Base de datos** (Database): la base en la que está la conexión, y una lista con las bases del servidor que puedes abrir
   (SQL Server, MySQL, MariaDB y PostgreSQL). Elegir otra lleva la conexión a esa, vuelve a cargar la lista
   de tablas y el log lo dice; desde entonces las tools del agente leen esa base. En SQLite y Firebird la
-  base es el fichero, y la lista sale en gris. Cambiar de base abre una conexión nueva al servidor: con
+  base es el fichero, y la lista sale en gris. En SQL Server, MySQL y MariaDB el cambio es
+  un `USE` en la misma conexión, y no necesita la contraseña. Cuando el servidor no admite el `USE` (Azure SQL
+  Database no lo admite), y siempre en PostgreSQL, cambiar de base abre una conexión nueva al servidor: con
   contraseña, FoxDock solo puede hacerlo si la contraseña está guardada (**Recordarla**); si no, la ventana lo
   dice y la conexión se queda donde estaba.
 - **Filtro** (Filter): teclea parte de un nombre y la lista deja las tablas y vistas que lo contienen (sin distinguir
@@ -212,9 +222,13 @@ otra vez trae esa ventana delante. En ella:
   - **la base de datos**: la abierta en VFP, una de la carpeta del proyecto abierto, o una nueva con el nombre que
     teclees (sin proyecto, en `%LOCALAPPDATA%\FoxDock\data\`);
   - **el nombre** de la vista (no puede ser el de una tabla del `.dbc`; el de una vista suya, sí: ver **Reemplazar**
-    abajo), **las columnas** en orden alfabético
-    (todas marcadas de entrada; **Todas** (All), **Ninguna** (None) o **Ctrl+A** en la lista; la vista guarda el
-    orden de la tabla) y un **WHERE** opcional (lo comprueba el servidor; lo que diga, lo dice la ventana);
+    abajo), **las columnas**, como en el diseñador de vistas de VFP: **Columnas disponibles** a la izquierda,
+    todas las de la tabla en orden alfabético, y **Columnas seleccionadas** a la derecha, las que van en la vista,
+    en su orden (ninguna de entrada). **Añadir >** (Add), el doble clic o **Intro** añaden las que elegiste, y en
+    **Columnas disponibles** se quedan en gris; **< Quitar** (Remove) las vuelve a sacar. **Añadir todas >>** (Add
+    all) añade las que faltan en el orden de la tabla, y **<< Quitar todas** (Remove all) vacía la vista. **Ctrl+A**
+    elige la lista entera. Las barras a la izquierda de **Columnas seleccionadas** (o **Ctrl+Flecha arriba** y **Ctrl+Flecha
+    abajo**) cambian el orden. Y un **WHERE** opcional (lo comprueba el servidor; lo que diga, lo dice la ventana), y un **Ordenar por** opcional, escrito como lo toma el motor (`name DESC, id`, con o sin `ORDER BY` delante), que la vista conserva;
   - **Actualizable** (Updatable), si la tabla tiene clave primaria: entonces `TABLEUPDATE()` manda tus cambios al servidor.
     Con clave viene marcada de entrada; sin clave, apagada. Si la desmarcas, la siguiente ventana se abre desmarcada: se
     guarda en `config.json`, en la opción `connections.createViewUpdatable` (abajo). En
@@ -239,14 +253,14 @@ otra vez trae esa ventana delante. En ella:
     una segunda vista en el mismo `.dbc`: esas versiones dejaban la cadena de conexión con la contraseña en bloques
     sueltos del fichero `.dct` del `.dbc`. La conexión en sí estaba limpia, pero la contraseña seguía en el fichero.
     `PACK DATABASE`, con el `.dbc` abierto en exclusiva y nada suyo abierto, la quita. La 0.9.32 ya no lo hace.
-  - **El WHERE, probado antes**: con un **WHERE**, **Crear vista...** lo prueba primero con el motor, con un SELECT que no trae
+  - **El WHERE y el orden, probados antes**: con un **WHERE** o un **Ordenar por**, **Crear vista...** los prueba primero con el motor, con un SELECT que no trae
     filas por la conexión de FoxDock. Una columna o una función que no existe no hace la vista, y la ventana dice el
     error del motor. No ve un tipo que no casa (`id = 'abc'`), que fallará al abrir la vista. Una vista con
     parámetros (`?x`) no se prueba. Un **WHERE** que acaba en un comentario (`-- …`) no se acepta: quita el comentario.
   - **Una vista que falla** deja la conexión del `.dbc` como la deja una buena, preguntando la contraseña en la
     ventana del driver (no con el error 1526), y deja en el log su línea con el motivo.
   - **Crear** (Create) hace la vista y se apaga en cuanto está hecha, así que un segundo clic no hace otra. Se vuelve
-    a encender al cambiar algo de lo que haría otra vista: el nombre, la base, las columnas, el **WHERE** o la casilla
+    a encender al cambiar algo de lo que haría otra vista: el nombre, la base, las columnas, el **WHERE**, el **Ordenar por** o la casilla
     **Actualizable**.
   - Con un nombre que el `.dbc` elegido ya tiene como vista, el botón dice **Reemplazar** (Replace), y la ventana lo
     explica antes de pulsarlo: «La vista X ya existe en Y.dbc: Reemplazar la vuelve a crear con lo de arriba.».
@@ -267,6 +281,9 @@ otra vez trae esa ventana delante. En ella:
   clipboard). Las columnas y la clave primaria salen del servidor, no de las filas (abajo, debajo de la tabla de tipos);
   `UPDATE` va por las columnas de la clave, una o varias, y por todos los campos si no tiene, y un comentario del script lo
   dice. Los nombres van citados como los quiere el dialecto del script. Nada queda abierto en el IDE.
+- **Consulta...** (Query...): abre la ventana de **Consulta...** de la conexión con un `SELECT` de la elegida ya escrito
+  (`SELECT *`, `FROM <tabla>`, `WHERE 1 = 1`, uno por línea), para que solo añadas las condiciones detrás de `WHERE 1 = 1` y
+  pulses **Ejecutar**. Como la del menú, solo escribe en una conexión con **Permitir escribir**.
 
 Los dos `BROWSE` son de solo lectura: no se puede cambiar, añadir ni borrar una fila. Sus cursores son
 `c_<conexión>_<tabla>_columns` y `c_<conexión>_<tabla>`, y se cierran con la ventana salvo que marques
@@ -276,6 +293,8 @@ recuerda, y el aviso dice cuáles quedan abiertos). **Consulta...** tiene la mis
 casilla o sin ella.
 Lo que la ventana tiene que decir va en su cuadro de abajo, en el aviso de arriba a la derecha de VFP y en el
 log.
+
+**Una vista desde el SQL de Consulta....** **Consulta...** tiene un botón **Crear vista...** que solo se enciende cuando la sentencia del cuadro es la última que se ejecutó y leyó; cambiar una letra lo apaga, y una sentencia que escribe no lo enciende nunca. Abre la ventana de **Crear vista...** con la sentencia, de solo lectura, en el sitio de las columnas: eliges la base de datos y el nombre, y **Crear**, **Reemplazar**, **Abrir** y las líneas para abrirla van como arriba, sin contraseña en el `.dbc`. La vista es siempre de solo lectura: para guardar cambios, hazla desde una tabla con **Crear vista...**. VFP toma la sentencia en una línea de comando, así que no acepta una de más de unos 8.100 caracteres, ni una con un comentario (`--`). Una columna calculada (`COUNT(*)`, una función) toma el tipo que tenía cuando se ejecutó la consulta.
 
 **A objeto, para la ventana de comandos.** **Consulta...** y **Explorar...** tienen un botón **A objeto** con un
 cuadro **Variable** al lado. En **Consulta...** toma el resultado del último **Ejecutar**; en **Explorar...**, las filas
@@ -342,14 +361,14 @@ la del proyecto. Un fichero es un array JSON:
 | `user` | Vacío con `windowsAuth`, y con SQLite |
 | `driver` | El driver ODBC; vacío, el de la tabla de abajo |
 | `windowsAuth` | `true`: la autenticación de Windows (SQL Server), y sin contraseña |
-| `allowWrite` | `true`: el agente puede escribir por esta conexión con `ide_data_db_execute`, con rol de agente 10 o más. `false` si no está |
+| `allowWrite` | `true`: tú puedes escribir por esta conexión con **Consulta...**, y el agente con `ide_data_db_execute`, con rol de agente 10 o más. `false` si no está |
 | `agentCanRead` | `true`: el agente puede leer por esta conexión. `false` si no está |
 
 Un fichero con una contraseña dentro (una clave `password`, `pwd`, `passwd`, `secret` o `pass`, o `pwd=`
 dentro de un valor) no se lee entero, y el log dice qué conexión y qué clave, nunca el valor. La contraseña
 va aparte: **Recordarla** en **Conectar...** la guarda en `%LOCALAPPDATA%\FoxDock\secrets\<id>.cred`,
 cifrada con tu cuenta de Windows (DPAPI), y solo tu usuario de Windows en esta máquina puede leerla. Para
-olvidarla, borra ese fichero.
+olvidarla, **Olvidar la contraseña** en el menú de la conexión borra ese fichero.
 
 **`agentCanRead`, conexión a conexión.** Lo que lee el agente sale de tu máquina hacia el proveedor de la
 IA. Con datos de clientes eso lo decides tú, así que está apagado hasta que pongas `"agentCanRead": true` en

@@ -158,14 +158,22 @@ Was keine Entsprechung hat, und was damit geschieht:
 
 **FoxDock > Daten > Verbindungen** (FoxDock > Data > Connections) speichert die Verbindungen zu Ihren Datenbankservern (SQL Server, MySQL,
 MariaDB, PostgreSQL, Firebird und SQLite) und öffnet sie aus der IDE, über FoxRemote (eine Bibliothek, die das Paket
-mit `requires` anfordert: sie liegt unverändert in `lib\foxremote\`). Jede Verbindung ist ein Menüpunkt mit einem eigenen Untermenü:
+mit `requires` anfordert: sie liegt unverändert in `lib\foxremote\`). **Erkunden...** (Explore...) und **Abfrage...** (Query...) stehen direkt in **Daten**, neben **Verbindungen**, und arbeiten mit der *aktuellen Verbindung*, deren Namen sie tragen: **Erkunden... (Shop)**, **Abfrage... (Shop)**. Ohne Verbindungen sind sie ausgegraut. Jede Verbindung ist ein Menüpunkt von **Verbindungen** mit einem eigenen Untermenü; die aktuelle trägt **(aktuell)**:
 
 | Menüpunkt | Was er tut |
 |---|---|
 | **Verbinden...** (Connect...) | Verbindet. Hat die Verbindung einen `user` und ist kein Passwort gespeichert, fragt ein kleines Fenster danach; mit **Merken** (Remember) wird es gespeichert, verschlüsselt mit Ihrem Windows-Konto |
 | **Trennen** (Disconnect) | Schließt die Verbindung |
-| **Erkunden...** (Explore...) | Das Fenster der Verbindung: ihre Datenbank, ihre Tabellen und Views, und die Spalten und Zeilen jeder davon (siehe unten) |
-| **Abfrage...** (Query...) | Ein Fenster mit einem Feld für ein `SELECT`, wie viele Zeilen es höchstens liest (**Limit**: anfangs 100, 0 ohne Grenze; es wird gemerkt) und **Ausführen** (Run): die Zeilen, in einem `BROWSE`. **Als Objekt** (To object) legt das Ergebnis in eine Variable für das Befehlsfenster (siehe unten) |
+| **Diese Verbindung verwenden** (Use this connection) | Macht sie zur aktuellen Verbindung: **Erkunden...** und **Abfrage...** in **Daten** arbeiten von da an mit ihr. Ausgegraut bei der, die es schon ist |
+| **Erkunden... (<aktuelle>)** (Explore...), in **Daten** | Das Fenster der Verbindung: ihre Datenbank, ihre Tabellen und Views, und die Spalten und Zeilen jeder davon (siehe unten) |
+| **Abfrage... (<aktuelle>)** (Query...), in **Daten** | Ein Fenster mit einem Feld für ein `SELECT`, wie viele Zeilen es höchstens liest (**Limit**: anfangs 100, 0 ohne Grenze; es wird gemerkt) und **Ausführen** (Run): die Zeilen, in einem `BROWSE`. **Als Objekt** (To object) legt das Ergebnis in eine Variable für das Befehlsfenster (siehe unten). Bei einer Verbindung mit **Schreiben erlauben** (Allow writing, `allowWrite`) schreibt es auch: ein `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP` oder `TRUNCATE`, dieselben, die der Agent ausführen darf, und das Feld sagt, was es getan hat und wie viele Zeilen; der Titel sagt **liest und schreibt**. Ein `UPDATE` oder `DELETE` ohne `WHERE`, ein `DROP` oder ein `TRUNCATE` wird nicht sofort gesendet: Das Feld sagt, was es täte, und daneben erscheint **Trotzdem ausführen** (Run it anyway); das SQL zu ändern nimmt es weg. Jedes Schreiben steht im Log |
+| **Passwort vergessen** (Forget password) | Nur bei einer Verbindung mit `user` und ohne Windows-Authentifizierung: löscht das mit **Merken** gespeicherte Passwort. Ausgegraut, wenn keines gespeichert ist. Eine offene Verbindung bleibt offen; das nächste **Verbinden...** fragt nach dem Passwort |
+
+**Die aktuelle Verbindung** gibt es einmal pro Benutzer, gespeichert in `options.data.connections.current` der `config.json`: die mit **Diese Verbindung verwenden** gewählte oder die zuletzt mit ihrem eigenen **Verbinden...** verbundene. Bis dahin, oder wenn sie nicht mehr in der Liste steht, ist es die erste verbundene, sonst die erste der Liste; das zu ermitteln schreibt nichts. Die Werkzeuge des Agenten, **Trennen**, **Neu laden** und eine verlorene Verbindung ändern sie nicht. Ist die aktuelle nicht verbunden, verbinden **Erkunden...** und **Abfrage...** zuerst, wie bisher.
+
+**Verbindung** (Connection), oben in **Erkunden...** und **Abfrage...**, listet alle Verbindungen, jede mit ihrem Typ, und **(nicht verbunden)** bei denen, die es nicht sind. In **Abfrage...** stellt die Wahl einer anderen dieses Fenster auf sie um: das geschriebene SQL bleibt, und es wird nichts ausgeführt; **Sicht erstellen...** und **Trotzdem ausführen** gehen aus (noch einmal ausführen); der Cursor von vorher geht wie beim Schließen des Fensters, außer wenn **Cursor beim Schließen offen lassen** angekreuzt ist; und ob geschrieben werden darf, entscheidet die neue Verbindung. In **Erkunden...** öffnet die Wahl einer anderen deren Fenster oder holt es nach vorn, und dieses bleibt, wie es ist. Ist die gewählte nicht bereit (sie verbindet nicht, oder sie braucht ihr Passwort und **Verbinden...** öffnet sich), ändert sich nichts, und das Fenster sagt, warum. Wer eine bereite wählt, macht sie zur aktuellen Verbindung.
+
+Eine Wahl zählt, wenn Sie sie wie in jeder Windows-Liste bestätigen: mit **Eingabe** oder mit einem Klick auf eine Zeile der offenen Liste. Das Durchgehen der Liste zählt nicht: die Pfeiltasten, Pos1, Ende, ein Buchstabe oder das Mausrad zeigen nur eine andere im Feld, und es wird nichts verbunden. **Esc** bei offener Liste schließt sie, und das Feld zeigt wieder die Verbindung des Fensters. Eine Verbindung, die im Feld steht und nicht bestätigt ist, wird genommen, wenn Sie **Ausführen** drücken (in **Erkunden...** eine Schaltfläche wie **Anzeigen**): Ist sie bereit, wechselt das Fenster zu ihr (in **Erkunden...** öffnet sich ihr Fenster, und die Schaltfläche tut in diesem nichts); ist sie es nicht, wird nichts ausgeführt, das Feld geht auf die Verbindung des Fensters zurück, und das Fenster sagt, warum. Wer das Fenster schließt, vergisst sie, und es wird nichts verbunden.
 
 Leerzeichen am Ende eines in **Verbinden...** eingegebenen Passworts gehen verloren, weil das Textfeld von VFP
 die Eingabe mit Leerzeichen auffüllt; Leerzeichen am Anfang bleiben erhalten.
@@ -177,9 +185,11 @@ ein zweiter Klick holt dieses Fenster nach vorn. Darin:
 - **Datenbank** (Database): die Datenbank, in der die Verbindung ist, und eine Liste der Datenbanken des Servers, die Sie
   öffnen dürfen (SQL Server, MySQL, MariaDB und PostgreSQL). Eine andere wählen bringt die Verbindung dorthin,
   lädt die Liste der Tabellen neu und schreibt es ins Log; ab dann lesen die Tools des Agenten diese
-  Datenbank. Bei SQLite und Firebird ist die Datenbank die Datei, und die Liste ist ausgegraut. Die Datenbank
-  wechseln öffnet eine neue Verbindung zum Server: Mit Passwort kann FoxDock das nur, wenn das Passwort
-  gespeichert ist (**Merken**); sonst sagt es das Fenster, und die Verbindung bleibt, wo sie war.
+  Datenbank. Bei SQLite und Firebird ist die Datenbank die Datei, und die Liste ist ausgegraut. Bei SQL Server, MySQL
+  und MariaDB ist der Wechsel ein `USE` auf derselben Verbindung und braucht kein Passwort. Wenn der Server das
+  `USE` ablehnt (Azure SQL Database nimmt es nicht an), und immer bei PostgreSQL, öffnet der Wechsel eine neue
+  Verbindung zum Server: Mit Passwort kann FoxDock das nur, wenn das Passwort gespeichert ist (**Merken**);
+  sonst sagt es das Fenster, und die Verbindung bleibt, wo sie war.
 - **Filter**: Tippen Sie einen Teil eines Namens, und die Liste behält die Tabellen und Views, die ihn
   enthalten (Groß- und Kleinschreibung egal); die **Eingabetaste** bringt Sie in die Liste, auf ihre erste
   Zeile. Daneben **Tabellen und Sichten** (Tables and views), **Tabellen** (Tables) oder **Sichten** (Views)
@@ -220,9 +230,14 @@ ein zweiter Klick holt dieses Fenster nach vorn. Darin:
   - **die Datenbank**: die in VFP offene, eine im Ordner des offenen Projekts oder eine neue mit dem Namen, den Sie
     eintippen (ohne Projekt in `%LOCALAPPDATA%\FoxDock\data\`);
   - **der Name** der View (nicht der Name einer Tabelle der `.dbc`; der Name einer ihrer Views schon: siehe
-    **Ersetzen** unten), **die Spalten** in alphabetischer Reihenfolge
-    (anfangs alle markiert; **Alle** (All), **Keine** (None) oder **Strg+A** in der Liste; die View behält die
-    Reihenfolge der Tabelle) und ein optionales **WHERE** (der Server prüft es; was er sagt, sagt das Fenster);
+    **Ersetzen** unten), **die Spalten**, wie im View-Designer von VFP: **Verfügbare Spalten** links, alle
+    Spalten der Tabelle in alphabetischer Reihenfolge, und **Ausgewählte Spalten** rechts, die Spalten der View in
+    ihrer Reihenfolge (anfangs keine). **Hinzufügen >** (Add), ein Doppelklick oder die **Eingabetaste** fügen die
+    gewählten hinzu, und in **Verfügbare Spalten** bleiben sie ausgegraut; **< Entfernen** (Remove) nimmt sie wieder
+    heraus. **Alle hinzufügen >>** (Add all) fügt die übrigen in der Reihenfolge der Tabelle hinzu, und
+    **<< Alle entfernen** (Remove all) leert die View. **Strg+A** wählt die ganze Liste. Die Leisten links von
+    **Ausgewählte Spalten** (oder **Strg+Pfeil nach oben** und **Strg+Pfeil nach unten**) ändern die Reihenfolge. Dazu ein
+    optionales **WHERE** (der Server prüft es; was er sagt, sagt das Fenster) und ein optionales **Sortieren nach**, so geschrieben, wie der Datenbankserver es nimmt (`name DESC, id`, mit oder ohne `ORDER BY` davor), das die Sicht behält;
   - **Aktualisierbar** (Updatable), wenn die Tabelle einen Primärschlüssel hat: Dann schickt `TABLEUPDATE()` Ihre Änderungen an den
     Server. Mit Schlüssel ist es anfangs markiert, ohne Schlüssel aus. Nehmen Sie die Markierung weg, öffnet sich das
     nächste Fenster ohne sie: Das wird in `config.json` gespeichert, in der Option `connections.createViewUpdatable`
@@ -249,7 +264,7 @@ ein zweiter Klick holt dieses Fenster nach vorn. Darin:
     Passwort in losen Blöcken der `.dct`-Datei der `.dbc` zurück. Die Verbindung selbst war sauber, aber das Passwort
     stand noch in der Datei. `PACK DATABASE`, mit der `.dbc` exklusiv geöffnet und nichts von ihr geöffnet, entfernt
     es. 0.9.32 tut das nicht mehr.
-  - **Das WHERE, vorher geprüft**: Mit einem **WHERE** prüft **Sicht erstellen...** es zuerst mit dem Datenbankserver, mit
+  - **Das WHERE und die Sortierung, vorher geprüft**: Mit einem **WHERE** oder einem **Sortieren nach** prüft **Sicht erstellen...** beides zuerst mit dem Datenbankserver, mit
     einem SELECT ohne Zeilen über die Verbindung von FoxDock. Eine Spalte oder eine Funktion, die es nicht gibt,
     erstellt keine Sicht, und das Fenster nennt den Fehler des Servers. Einen Typ, der nicht passt (`id = 'abc'`),
     sieht es nicht; die Sicht scheitert dann beim Öffnen. Eine Sicht mit Parametern (`?x`) wird nicht geprüft. Ein
@@ -258,7 +273,7 @@ ein zweiter Klick holt dieses Fenster nach vorn. Darin:
     Fenster des Treibers (nicht mit dem Fehler 1526), und sie hinterlässt ihre Zeile mit dem Grund im Log.
   - **Erstellen** (Create) erstellt die View und schaltet sich ab, sobald sie erstellt ist, sodass ein zweiter Klick
     keine weitere macht. Es schaltet sich wieder ein, wenn Sie etwas ändern, das eine andere View ergäbe: den Namen,
-    die Datenbank, die Spalten, das **WHERE** oder das Kästchen **Aktualisierbar**.
+    die Datenbank, die Spalten, das **WHERE**, das **Sortieren nach** oder das Kästchen **Aktualisierbar**.
   - Mit einem Namen, den die gewählte `.dbc` schon als View hat, heißt die Schaltfläche **Ersetzen** (Replace), und
     das Fenster erklärt es, bevor Sie sie drücken: «Die Sicht X gibt es schon in Y.dbc: Ersetzen erstellt sie neu mit
     dem, was oben steht.». **Ersetzen** löscht die View (`DROP VIEW`) und erstellt sie neu mit dem, was im Fenster
@@ -280,6 +295,9 @@ ein zweiter Klick holt dieses Fenster nach vorn. Darin:
   `UPDATE` geht über die Spalten des Schlüssels, eine oder mehrere, und über alle Felder, wenn er keinen hat, und ein
   Kommentar im Skript sagt es. Die Namen stehen in den Anführungszeichen, die der Dialekt des Skripts will. Nichts bleibt in der
   IDE offen.
+- **Abfrage...** (Query...): öffnet das Fenster **Abfrage...** der Verbindung mit einem `SELECT` der gewählten, schon
+  geschrieben (`SELECT *`, `FROM <Tabelle>`, `WHERE 1 = 1`, eins pro Zeile): Sie fügen nur die Bedingungen nach `WHERE 1 = 1`
+  hinzu und drücken **Ausführen**. Wie das aus dem Menü schreibt es nur bei einer Verbindung mit **Schreiben erlauben**.
 
 Beide `BROWSE` sind schreibgeschützt: Keine Zeile lässt sich ändern, hinzufügen oder löschen. Ihre Cursor
 heißen `c_<Verbindung>_<Tabelle>_columns` und `c_<Verbindung>_<Tabelle>` und werden mit dem Fenster
@@ -288,6 +306,8 @@ geschlossen, außer Sie markieren **Cursor beim Schließen offen lassen** (Keep 
 dasselbe Kästchen für seinen Cursor. **Trennen**, **Neu laden** (Reload) oder das Abschalten des Pakets
 schließen das Fenster und diese Cursor mit ihm, mit Kästchen oder ohne. Was das Fenster zu sagen hat, steht in seinem Feld unten,
 im Hinweis oben rechts in VFP und im Log.
+
+**Eine Sicht aus dem SQL von Abfrage....** **Abfrage...** hat eine Schaltfläche **Sicht erstellen...**, die sich nur einschaltet, wenn die Anweisung im Feld die letzte ist, die gelaufen ist und gelesen hat; ein geänderter Buchstabe schaltet sie aus, und eine Anweisung, die schreibt, schaltet sie nie ein. Sie öffnet das Fenster **Sicht erstellen...** mit der Anweisung, schreibgeschützt, an der Stelle der Spalten: Sie wählen die Datenbank und den Namen, und **Erstellen**, **Ersetzen**, **Öffnen** und die Zeilen zum Öffnen gehen wie oben, ohne Kennwort in der `.dbc`. Die Sicht ist immer schreibgeschützt: Um Änderungen zu speichern, erstellen Sie sie aus einer Tabelle mit **Sicht erstellen...**. VFP nimmt die Anweisung in einer Befehlszeile, deshalb lehnt es eine mit mehr als etwa 8.100 Zeichen ab, oder eine mit einem Kommentar (`--`). Eine berechnete Spalte (`COUNT(*)`, eine Funktion) bekommt den Typ, den sie beim Ausführen der Abfrage hatte.
 
 **Als Objekt, für das Befehlsfenster.** **Abfrage...** und **Erkunden...** haben eine Schaltfläche **Als Objekt** mit
 einem Feld **Variable** daneben. In **Abfrage...** nimmt sie das Ergebnis des letzten **Ausführen**; in
@@ -357,14 +377,14 @@ bleibt die des Projekts. Eine Datei ist ein JSON-Array:
 | `user` | Leer mit `windowsAuth`, und bei SQLite |
 | `driver` | Der ODBC-Treiber; leer, der aus der Tabelle unten |
 | `windowsAuth` | `true`: Windows-Authentifizierung (SQL Server), ohne Passwort |
-| `allowWrite` | `true`: Der Agent darf über diese Verbindung mit `ide_data_db_execute` schreiben, mit Agentenrolle 10 oder höher. `false`, wenn es fehlt |
+| `allowWrite` | `true`: Sie dürfen über diese Verbindung mit **Abfrage...** schreiben, und der Agent mit `ide_data_db_execute`, mit Agentenrolle 10 oder höher. `false`, wenn es fehlt |
 | `agentCanRead` | `true`: Der Agent darf über diese Verbindung lesen. `false`, wenn es fehlt |
 
 Eine Datei mit einem Passwort darin (ein Schlüssel `password`, `pwd`, `passwd`, `secret` oder `pass`, oder
 `pwd=` in einem Wert) wird gar nicht gelesen, und das Log sagt, welche Verbindung und welcher Schlüssel,
 nie den Wert. Das Passwort liegt woanders: **Merken** in **Verbinden...** speichert es in
 `%LOCALAPPDATA%\FoxDock\secrets\<id>.cred`, verschlüsselt mit Ihrem Windows-Konto (DPAPI), sodass nur Ihr
-Windows-Benutzer auf diesem Rechner es zurücklesen kann. Löschen Sie die Datei, um es zu vergessen.
+Windows-Benutzer auf diesem Rechner es zurücklesen kann. Um es zu vergessen, löscht **Passwort vergessen** im Menü der Verbindung diese Datei.
 
 **`agentCanRead`, Verbindung für Verbindung.** Was der Agent liest, verlässt Ihren Rechner in Richtung des
 KI-Anbieters. Bei Kundendaten entscheiden Sie das, deshalb ist es aus, bis Sie `"agentCanRead": true` in

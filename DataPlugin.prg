@@ -45,7 +45,7 @@ DEFINE CLASS DataPlugin AS PluginBase
 	cId = "data"
 	cTitle = "Data"
 	nOrder = 920
-	cVersion = "0.10.1"
+	cVersion = "0.11.0"
 	lWantsIdle = .T.
 	oModules = .NULL.
 	*-- .F.: OpenWithWindows no llama a ShellExecute (para las pruebas:
@@ -306,7 +306,15 @@ DEFINE CLASS DataPlugin AS PluginBase
 		RETURN IIF(ISNULL(loM), This.Off("connections"), loM.DisconnectBar(tcConn))
 	ENDPROC
 
-	*-- Explore...: la ventana de la conexión, con sus tablas.
+	*-- Use this connection: la de Explore... y Query... del menú Data.
+	PROCEDURE DbUse
+		LPARAMETERS tcConn
+		LOCAL loM
+		loM = This.Module("connections")
+		RETURN IIF(ISNULL(loM), This.Off("connections"), loM.UseBar(tcConn))
+	ENDPROC
+
+	*-- Explore... y Query...: con el id, esa conexión; sin él, la actual.
 	PROCEDURE DbExplore
 		LPARAMETERS tcConn
 		LOCAL loM
@@ -319,6 +327,13 @@ DEFINE CLASS DataPlugin AS PluginBase
 		LOCAL loM
 		loM = This.Module("connections")
 		RETURN IIF(ISNULL(loM), This.Off("connections"), loM.QueryBar(tcConn))
+	ENDPROC
+
+	PROCEDURE DbForget
+		LPARAMETERS tcConn
+		LOCAL loM
+		loM = This.Module("connections")
+		RETURN IIF(ISNULL(loM), This.Off("connections"), loM.ForgetBar(tcConn))
 	ENDPROC
 
 	PROCEDURE DbEdit

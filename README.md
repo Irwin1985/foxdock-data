@@ -151,14 +151,22 @@ What has no equivalent, and what is done with it:
 
 **FoxDock > Data > Connections** keeps the connections to your database servers (SQL Server, MySQL,
 MariaDB, PostgreSQL, Firebird and SQLite) and opens them from the IDE, through FoxRemote (a library the package asks for
-with `requires`: it comes untouched in `lib\foxremote\`). Each connection is a bar with its own submenu:
+with `requires`: it comes untouched in `lib\foxremote\`). **Explore...** and **Query...** sit in **Data** itself, next to **Connections**, and work on the *current connection*, whose name they carry: **Explore... (Shop)**, **Query... (Shop)**. With no connections they are greyed out. Each connection is a bar of **Connections** with its own submenu; the current one carries **(current)**:
 
 | Bar | What it does |
 |---|---|
 | **Connect...** | Connects. When the connection has a `user` and no password kept, a small window asks for it; with **Remember** it is kept, encrypted with your Windows account |
 | **Disconnect** | Closes the connection |
-| **Explore...** | The window of the connection: its database, its tables and views, and the columns and rows of each (below) |
-| **Query...** | A window with a box for a `SELECT`, the most rows to read (**Limit**: 100 to start with, 0 for no limit; it is remembered) and **Run**: the rows, in a `BROWSE`. **To object** puts the result in a variable for the Command window (below) |
+| **Use this connection** | Makes it the current connection: **Explore...** and **Query...** of **Data** work on it from then on. Greyed out on the current one |
+| **Explore... (<current>)**, in **Data** | The window of the connection: its database, its tables and views, and the columns and rows of each (below) |
+| **Query... (<current>)**, in **Data** | A window with a box for a `SELECT`, the most rows to read (**Limit**: 100 to start with, 0 for no limit; it is remembered) and **Run**: the rows, in a `BROWSE`. **To object** puts the result in a variable for the Command window (below). On a connection with **Allow writing** (`allowWrite`) it also writes: one `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP` or `TRUNCATE`, the same ones the agent may run, and the box says what it did and how many rows; the title says **reads and writes**. An `UPDATE` or a `DELETE` without `WHERE`, a `DROP` or a `TRUNCATE` is not sent at once: the box says what it would do and **Run it anyway** appears beside it; changing the SQL takes it away. Every write goes to the log |
+| **Forget password** | Only in a connection with a `user` and without Windows authentication: removes the password kept with **Remember**. Greyed out when none is kept. An open connection stays open; the next **Connect...** asks for the password |
+
+**The current connection** is one per user, kept in `options.data.connections.current` of `config.json`: the one you chose with **Use this connection**, or the last one you connected with its own **Connect...**. Until then, or when that one is no longer in the list, it is the first connected one, or else the first of the list; working that out writes nothing. The agent's tools, **Disconnect**, **Reload** and a lost connection do not change it. With the current one not connected, **Explore...** and **Query...** connect first, as before.
+
+**Connection**, at the top of **Explore...** and **Query...**, lists all the connections, each with its engine, and **(not connected)** on the ones that are not. In **Query...**, choosing another moves that window to it: the SQL you wrote stays and nothing runs; **Create view...** and **Run it anyway** go off (run it again); the cursor of before goes as when the window closes, unless **Keep the cursors open when it closes** is ticked; and whether it writes is up to the new connection. In **Explore...**, choosing another opens the window of that one, or brings it to the front, and this one stays as it is. If the one you choose is not ready (it does not connect, or it needs its password and **Connect...** opens), nothing changes and the window says why. Choosing one that is ready makes it the current connection.
+
+A choice counts when you confirm it as in any Windows list: **Enter**, or a click on a line of the open list. Going over the list does not count: the arrows, Home, End, a letter or the mouse wheel only show another one in the box, and nothing connects. **Esc** with the list open closes it and puts the box back on the connection of the window. A connection shown in the box and not confirmed is taken when you press **Run** (in **Explore...**, a button such as **Browse**): if it is ready, the window moves to it (in **Explore...**, its window opens and the button does nothing in this one); if it is not, nothing runs, the box goes back to the connection of the window, and the window says why. Closing the window forgets it and connects to nothing.
 
 Spaces at the end of a password typed in **Connect...** are lost, because the VFP text box pads what you
 type with spaces; spaces at the start are kept.
@@ -170,7 +178,9 @@ again brings that window to the front. In it:
 - **Database**: the database the connection is in, and a list of the databases of the server you can open
   (SQL Server, MySQL, MariaDB and PostgreSQL). Choosing another one moves the connection there, reloads the
   list of tables and says so in the log; the agent's tools read that database from then on. For SQLite and
-  Firebird the database is the file, and the list is greyed out. Changing database opens a new connection
+  Firebird the database is the file, and the list is greyed out. On SQL Server, MySQL and MariaDB
+  the change is a `USE` on the same connection, so it needs no password. When the server refuses the `USE`
+  (Azure SQL Database does not take it), and always on PostgreSQL, changing database opens a new connection
   to the server: with a password, FoxDock can do it only if the password was kept (**Remember**); if not,
   the window says so and the connection stays where it was.
 - **Filter**: type part of a name and the list keeps the tables and views that contain it (capitals do not
@@ -209,9 +219,12 @@ again brings that window to the front. In it:
   - **the database**: the one open in VFP, one in the folder of the open project, or a new one with the name you
     type (without a project, in `%LOCALAPPDATA%\FoxDock\data\`);
   - **the name** of the view (it may not be the name of a table in the `.dbc`; the name of one of its views, yes:
-    see **Replace** below), **the columns** in alphabetical order
-    (all marked to start with; **All**, **None** or **Ctrl+A** in the list; the view keeps the order of the
-    table), an optional **WHERE** (the server checks it: what it says, the window says);
+    see **Replace** below), **the columns**, as in the view designer of VFP: **Available columns** on the left,
+    every column of the table in alphabetical order, and **Selected columns** on the right, the ones that go in the
+    view, in its order (none to start with). **Add >** and a double click or **Enter** add the ones you chose, and
+    they stay greyed out in **Available columns**; **< Remove** takes them out again. **Add all >>** adds the rest in
+    the order of the table, and **<< Remove all** empties the view. **Ctrl+A** chooses the whole list. The bars on
+    the left of **Selected columns** (or **Ctrl+Up** and **Ctrl+Down**) change the order. Then an optional **WHERE** (the server checks it: what it says, the window says), and an optional **Order by**, written as the engine takes it (`name DESC, id`, with or without `ORDER BY` in front), which the view keeps;
   - **Updatable**, when the table has a primary key: `TABLEUPDATE()` then sends your changes to the server. With a
     key it is marked to start with; without one, it is off. If you unmark it, the next window opens unmarked: it is
     kept in `config.json`, in the option `connections.createViewUpdatable` (below). On
@@ -236,7 +249,7 @@ again brings that window to the front. In it:
     or a second view in the same `.dbc`: those versions left the connection string with the password in loose blocks
     of the `.dct` file of the `.dbc`. The connection itself was clean, but the password was still in the file.
     `PACK DATABASE`, with the `.dbc` open exclusively and nothing of it open, removes it. 0.9.32 no longer does it.
-  - **The WHERE, tried first**: with a **WHERE**, **Create view...** tries it first with the engine, with a SELECT that
+  - **The WHERE and the order, tried first**: with a **WHERE** or an **Order by**, **Create view...** tries them first with the engine, with a SELECT that
     brings no rows through the connection of FoxDock. A column or a function that is not there makes no view, and the
     window says the error of the engine. It does not see a type that does not match (`id = 'abc'`), which fails when
     the view opens. A view with parameters (`?x`) is not tried. A **WHERE** that ends in a comment (`-- …`) is not
@@ -245,7 +258,7 @@ again brings that window to the front. In it:
     window of the driver (not with error 1526), and leaves its line in the log with the reason.
   - **Create** makes the view and turns itself off as soon as it is made, so a second click does not make another
     one. It turns on again when you change something that would make a different view: the name, the database, the
-    columns, the **WHERE** or the **Updatable** box.
+    columns, the **WHERE**, the **Order by** or the **Updatable** box.
   - With a name the chosen `.dbc` already has as a view, the button says **Replace**, and the window explains it
     before you press it: «The view X already exists in Y.dbc: Replace makes it again with what is above.».
     **Replace** drops the view (`DROP VIEW`) and makes it again with what is in the window. It refuses when that view
@@ -265,6 +278,9 @@ again brings that window to the front. In it:
   from the server, not from the rows (see below the table of types); `UPDATE` goes by the columns of the key, one or several, and
   by all the fields when it has none, and a comment in the script says which. The names are quoted as the dialect of the
   script wants them. Nothing stays open in the IDE.
+- **Query...**: opens the **Query...** window of the connection with a `SELECT` of the one you chose already written
+  (`SELECT *`, `FROM <table>`, `WHERE 1 = 1`, one per line), so you only add the conditions after `WHERE 1 = 1` and press
+  **Run**. Like the one of the menu, it writes only on a connection with **Allow writing**.
 
 Both `BROWSE` windows are read-only: you cannot change, add or delete a row. Their cursors are
 `c_<connection>_<table>_columns` and `c_<connection>_<table>`, and they close with the window unless you mark
@@ -272,6 +288,8 @@ Both `BROWSE` windows are read-only: you cannot change, add or delete a row. The
 stay open). **Query...** has the same box for its cursor. **Disconnect**, **Reload** or turning the package off
 closes the window and those cursors with it, box or not. What the window has to say goes in its box at the bottom, in the notice at the top
 right of VFP and in the log.
+
+**A view from the SQL of Query....** **Query...** has a **Create view...** button that turns on only when the statement in the box is the last one that ran and read; changing a letter turns it off, and a statement that writes never turns it on. It opens the **Create view...** window with the statement, read-only, in place of the columns: you choose the database and the name, and **Create**, **Replace**, **Open** and the lines to open it work as above, with no password in the `.dbc`. The view is always read only: to save changes, make it from a table with **Create view...**. VFP takes the statement in one command line, so it refuses one longer than about 8,100 characters, or one with a comment (`--`). A computed column (`COUNT(*)`, a function) takes the type it had when the query ran.
 
 **To object, for the Command window.** **Query...** and **Explore...** have a **To object** button with a
 **Variable** box beside it. In **Query...** it takes the result of the last **Run**; in **Explore...**, the rows of
@@ -337,14 +355,14 @@ project's one stays. A file is a JSON array:
 | `user` | Empty with `windowsAuth`, and with SQLite |
 | `driver` | The ODBC driver; empty, the one in the table below |
 | `windowsAuth` | `true`: Windows authentication (SQL Server), and no password |
-| `allowWrite` | `true`: the agent may write through this connection with `ide_data_db_execute`, with agent role 10 or higher. `false` when it is not there |
+| `allowWrite` | `true`: you may write through this connection with **Query...**, and the agent with `ide_data_db_execute`, with agent role 10 or higher. `false` when it is not there |
 | `agentCanRead` | `true`: the agent may read through this connection. `false` when it is not there |
 
 A file with a password in it (a `password`, `pwd`, `passwd`, `secret` or `pass` key, or `pwd=` inside a
 value) is not read at all, and the log says which connection and which key, never the value. The password
 goes apart: **Remember** in **Connect...** keeps it in `%LOCALAPPDATA%\FoxDock\secrets\<id>.cred`,
 encrypted with your Windows account (DPAPI), so only your Windows user on this machine can read it back.
-Delete that file to forget it.
+To forget it, **Forget password** in the menu of the connection removes that file.
 
 **`agentCanRead`, connection by connection.** What the agent reads leaves your machine for the provider of
 the AI. With customer data that is your decision, so it is off until you put `"agentCanRead": true` in that
