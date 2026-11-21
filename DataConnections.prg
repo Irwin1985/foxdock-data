@@ -6235,7 +6235,14 @@ DEFINE CLASS DataQueryForm AS DataConnectionForm
 		This.spnLimit.Value = toModule.QueryLimit()
 		IF VARTYPE(tcSql) == "C" AND !EMPTY(tcSql)
 			This.edtSql.Value = tcSql
-			This.edtSql.SelStart = LEN(tcSql)
+			*-- Con un SQL dado, el cursor detrás: lo que se teclea va a continuación.
+			This.edtSql.SelStart = LEN(This.edtSql.Value)
+			This.edtSql.SelLength = 0
+		ELSE
+			*-- La plantilla, seleccionada entera: lo que se teclea la sustituye, y con
+			*-- Fin o una flecha se queda.
+			This.edtSql.SelStart = 0
+			This.edtSql.SelLength = LEN(This.edtSql.Value)
 		ENDIF
 	ENDPROC
 

@@ -325,6 +325,25 @@ DEFINE CLASS DataJson AS Custom
 		RETURN lcRaw
 	ENDPROC
 
+	*-- Por qué tcText no es JSON válido, según la librería; "" si lo es. Parse
+	*-- lanza un error con lo que no entiende: va en su propio TRY.
+	PROTECTED PROCEDURE ParseError
+		LPARAMETERS tcText
+		LOCAL loP, loJ, loErr, lcWhy
+		lcWhy = ""
+		TRY
+			loP = This.Plugin()
+			loJ = loP.JsonFox()
+			loJ.Parse(tcText)
+			IF loJ.lError
+				lcWhy = loJ.cLastError
+			ENDIF
+		CATCH TO loErr
+			lcWhy = loErr.Message
+		ENDTRY
+		RETURN lcWhy
+	ENDPROC
+
 	*-- Un cursor en la sesión de datos 1 desde un texto JSON (un array de
 	*-- objetos, o un objeto suelto: una fila). tcCursor vacío: json_<n>, el
 	*-- primero libre. Devuelve su nombre, o "" con el motivo en cLastError.
@@ -333,12 +352,24 @@ DEFINE CLASS DataJson AS Custom
 	*-- cursor vacío con las columnas del esquema (SchemaCursor).
 	PROCEDURE FromJson
 		LPARAMETERS tcJson, tcCursor
-		LOCAL lcText, lcCursor, lnDs, loJ, loErr, lnI, loP, lcRows, lcSchema
+		LOCAL lcText, lcCursor, lnDs, loJ, loErr, lnI, loP, lcRows, lcSchema, lcWhy
 		This.cLastError = ""
 		This.cLastCursor = ""
 		This.nLastRows = 0
 		lcText = ALLTRIM(IIF(VARTYPE(tcJson) $ "CM", tcJson, ""), 1, " ", CHR(9), CHR(13), CHR(10))
 		lcSchema = ""
+		*-- Una lista que no empieza por un objeto ([1,2,3], ["a"], [[1]], []): la
+		*-- librería diría «Expect '{' before json object.». Si es JSON válido, se dice
+		*-- la forma que hace falta; si no, que no está completo o no es válido.
+		IF LEFT(lcText, 1) == "[" AND !(LEFT(ALLTRIM(SUBSTR(lcText, 2), 1, " ", CHR(9), CHR(13), CHR(10)), 1) == "{")
+			lcWhy = This.ParseError(lcText)
+			IF !EMPTY(lcWhy)
+				This.cLastError = "the JSON is not complete or not valid: " + lcWhy
+			ELSE
+				This.cLastError = 'it is valid JSON, but JSON to cursor needs an object or a list of objects, like [{"id": 1, "name": "Ann"}], and this list has none.'
+			ENDIF
+			RETURN ""
+		ENDIF
 		DO CASE
 			CASE LEFT(lcText, 1) == "{"
 				lcRows = This.TopArray(lcText, "rows")
@@ -389,7 +420,12 @@ DEFINE CLASS DataJson AS Custom
 					loJ.JSONToCursor(lcText, lcCursor, 1)
 					DO CASE
 						CASE loJ.lError
+							*-- Si ni siquiera es JSON válido (cortado, mal formado), se dice
+							*-- así, con lo que dice la librería detrás.
 							This.cLastError = loJ.cLastError
+							IF !EMPTY(This.ParseError(lcText))
+								This.cLastError = "the JSON is not complete or not valid: " + This.cLastError
+							ENDIF
 						CASE !USED(lcCursor)
 							This.cLastError = "JSONFox made no cursor from it."
 						OTHERWISE
