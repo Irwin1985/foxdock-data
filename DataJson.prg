@@ -43,6 +43,8 @@ DEFINE CLASS DataJson AS Custom
 	cLastCursor = ""
 	cLastClip = ""    && lo último que puso en el portapapeles (para las pruebas)
 	cLastError = ""
+	cLastWhyKey = ""  && el motivo de cLastError como clave de idioma, si la tiene ("" si no)
+	cLastWhyV1 = ""   && lo que va en {1} de esa clave (lo que dice la librería)
 	nLastRows = 0
 	cCtl = ""         && los caracteres de control que van como \u00XX
 
@@ -157,7 +159,7 @@ DEFINE CLASS DataJson AS Custom
 		*-- lcFrom es una clave (el portapapeles, el texto) o la ruta del fichero.
 		lcCursor = This.FromJson(lcJson, "")
 		IF EMPTY(lcCursor)
-			This.oHost.Notify(This.oHost.Translate("data.json.notRead", This.FromShown(lcFrom, .F.), This.oHost.Quoted(This.cLastError)), ;
+			This.oHost.Notify(This.oHost.Translate("data.json.notRead", This.FromShown(lcFrom, .F.), This.WhyShown()), ;
 				This.oHost.TranslateEn("data.json.notRead", This.FromShown(lcFrom, .T.), This.cLastError))
 			RETURN .F.
 		ENDIF
@@ -173,13 +175,25 @@ DEFINE CLASS DataJson AS Custom
 		RETURN .T.
 	ENDPROC
 
-	*-- De dónde vino el JSON, dicho (tlEn: en inglés, para el log).
-	PROTECTED PROCEDURE FromShown
+	*-- De dónde vino el JSON, dicho con su preposición, porque cada idioma la
+	*-- junta a su manera con el artículo (tlEn: en inglés, para el log). tcFrom
+	*-- es una clave (el portapapeles, el texto dado) o la ruta del fichero.
+	PROCEDURE FromShown
 		LPARAMETERS tcFrom, tlEn
 		IF LEFT(tcFrom, 10) == "data.json."
 			RETURN IIF(tlEn, This.oHost.TranslateEn(tcFrom), This.oHost.Translate(tcFrom))
 		ENDIF
-		RETURN tcFrom
+		RETURN IIF(tlEn, This.oHost.TranslateEn("data.json.fromFile", tcFrom), This.oHost.Translate("data.json.fromFile", tcFrom))
+	ENDPROC
+
+	*-- Por qué no se leyó, para el aviso: en el idioma de FoxDock si data sabe
+	*-- decirlo, con lo que dice la librería detrás tal cual; si no, el inglés
+	*-- de cLastError entre comillas. El log y la tool llevan cLastError.
+	PROCEDURE WhyShown
+		IF EMPTY(This.cLastWhyKey)
+			RETURN This.oHost.Quoted(This.cLastError)
+		ENDIF
+		RETURN This.oHost.Translate(This.cLastWhyKey, This.oHost.Quoted(This.cLastWhyV1))
 	ENDPROC
 
 	*--------------------------------------------------------------
@@ -354,6 +368,8 @@ DEFINE CLASS DataJson AS Custom
 		LPARAMETERS tcJson, tcCursor
 		LOCAL lcText, lcCursor, lnDs, loJ, loErr, lnI, loP, lcRows, lcSchema, lcWhy
 		This.cLastError = ""
+		This.cLastWhyKey = ""
+		This.cLastWhyV1 = ""
 		This.cLastCursor = ""
 		This.nLastRows = 0
 		lcText = ALLTRIM(IIF(VARTYPE(tcJson) $ "CM", tcJson, ""), 1, " ", CHR(9), CHR(13), CHR(10))
@@ -365,8 +381,11 @@ DEFINE CLASS DataJson AS Custom
 			lcWhy = This.ParseError(lcText)
 			IF !EMPTY(lcWhy)
 				This.cLastError = "the JSON is not complete or not valid: " + lcWhy
+				This.cLastWhyKey = "data.json.why.notValid"
+				This.cLastWhyV1 = lcWhy
 			ELSE
 				This.cLastError = 'it is valid JSON, but JSON to cursor needs an object or a list of objects, like [{"id": 1, "name": "Ann"}], and this list has none.'
+				This.cLastWhyKey = "data.json.why.noObjects"
 			ENDIF
 			RETURN ""
 		ENDIF
@@ -424,6 +443,8 @@ DEFINE CLASS DataJson AS Custom
 							*-- así, con lo que dice la librería detrás.
 							This.cLastError = loJ.cLastError
 							IF !EMPTY(This.ParseError(lcText))
+								This.cLastWhyKey = "data.json.why.notValid"
+								This.cLastWhyV1 = This.cLastError
 								This.cLastError = "the JSON is not complete or not valid: " + This.cLastError
 							ENDIF
 						CASE !USED(lcCursor)
